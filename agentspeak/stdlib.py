@@ -52,11 +52,11 @@ LOGGER = agentspeak.get_logger(__name__)
 #   - .fail_goal            #Enric
 #   - .intend               #Enric
 #   - .succeed_goal         #Enric
-#   - .add_anot
-#   - .at
-#   - .create_agent
-#   - .kill_agent
-#   - .perceive
+#   - .add_anot / .add_annot #Enric
+#   - .at                   #Enric
+#   - .create_agent         #Enric
+#   - .kill_agent           #Enric
+#   - .perceive             #Enric
 
 
 actions = agentspeak.Actions()
@@ -271,6 +271,39 @@ actions.add_predicate(".structure", (None, ), agentspeak.is_structure)
 @agentspeak.optimizer.no_scope_effects
 def _ground(agent, term, intention):
     if agentspeak.is_ground(term, intention.scope):
+        yield
+
+
+@actions.add(".add_annot", 3)  # Enric
+@agentspeak.optimizer.function_like
+def _add_annot(agent, term, intention):
+    """.add_annot(Belief, Annotation, Result)
+
+    Add Annotation to Belief and unify the outcome with Result, without
+    mutating Belief: .add_annot(a, source(jomi), B) unifies B with
+    a[source(jomi)]. If Belief is a list, the annotation is added to every
+    element instead, and Result unifies with the resulting list, e.g.
+    .add_annot([a1,a2], source(jomi), B) unifies B with
+    [a1[source(jomi)], a2[source(jomi)]]. Mirrors Jason's .add_annot
+    exactly, args and all -- as Jason's own docs note, plain unification
+    (e.g. B = a[source(jomi)]) already does the same thing, so this
+    action exists purely for parity with the reference stdlib.
+    """
+    belief = agentspeak.freeze(term.args[0], intention.scope, {})
+    annotation = agentspeak.freeze(term.args[1], intention.scope, {})
+
+    if agentspeak.is_list(belief):
+        result = tuple(
+            item.with_annotation(annotation) if agentspeak.is_literal(item) else item
+            for item in belief
+        )
+    elif agentspeak.is_literal(belief):
+        result = belief.with_annotation(annotation)
+    else:
+        raise agentspeak.AslError(
+            "expected a literal or a list of literals for .add_annot, got: '%s'" % belief)
+
+    if agentspeak.unify(term.args[2], result, intention.scope, intention.stack):
         yield
 
 
@@ -529,6 +562,17 @@ def _drop_all_desires(agent, term, intention):
     yield from _drop_all_intentions(agent, term, intention)
 
 
+# .kill_agent needs a handle on the platform agent .create_agent spawns.
+# The integration layer (spade_bdi) is left untouched, so that handle is
+# kept here, in a registry owned by the standard-library module itself,
+# mapping a created agent's short name (the one given to .create_agent,
+# not its full JID) to its platform BDIAgent object. This is deliberately
+# global rather than scoped per creator -- the simplest reading of the
+# open question recorded in the design notes, and the one that keeps
+# .kill_agent broadly useful without any hook into spade_bdi.
+_created_agents = {}  # Enric
+
+
 @actions.add(".create_agent", 2)  # Enric
 def _create_agent(agent, term, intention):
     import asyncio
@@ -548,8 +592,65 @@ def _create_agent(agent, term, intention):
     async def _spawn():
         child = BDIAgent(new_jid, password, source)
         await child.start(auto_register=True)
+        _created_agents[name] = child  # Enric: register for .kill_agent
 
     loop.create_task(_spawn())
+    yield
+
+
+@actions.add(".kill_agent", 1)  # Enric
+@actions.add(".kill_agent", 2)  # Enric
+def _kill_agent(agent, term, intention):
+    """.kill_agent(Name[, Deadline])
+
+    Stop and remove a previously .create_agent-created platform agent
+    identified by Name -- the same short name given to .create_agent, not
+    its full JID. Goal/registry lookup mirrors Jason's
+    .kill_agent(Name[, Deadline]); as in the reference implementation, any
+    agent can kill any other agent this way, with no permission check.
+
+    Without Deadline, the target is stopped right away. With Deadline (a
+    number of seconds), Jason's own grace-period semantics are followed:
+    a +jag_shutting_down(Deadline) belief event is delivered to the target
+    first, so it can react (e.g. let a running intention finish) before
+    being stopped Deadline seconds later. Message delivery is a direct
+    Python call into the target's own agentspeak Agent (agent.bdi_agent) --
+    the same shortcut .broadcast/.send already take for agents sharing an
+    Environment, here applied via our own registry instead -- rather than
+    a real XMPP round trip.
+
+    Exactly like .create_agent's own asynchronous start, both delivering
+    the shutdown signal and the eventual stop happen out of line with this
+    call, on the asyncio event loop already driving the reasoning cycle
+    (the deadline itself reuses .at's loop.call_later mechanism).
+    """
+    import asyncio
+
+    name = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+    try:
+        target = _created_agents.pop(name)
+    except KeyError:
+        raise agentspeak.AslError(
+            ".kill_agent: no agent created via .create_agent is known by the name '%s'" % name)
+
+    loop = asyncio.get_running_loop()
+
+    if len(term.args) == 2:
+        deadline = agentspeak.grounded(term.args[1], intention.scope)
+        if not agentspeak.is_number(deadline):
+            raise agentspeak.AslError("expected a numeric deadline for .kill_agent")
+        deadline = float(deadline)
+
+        if target.bdi_agent is not None:
+            target.bdi_agent.call(
+                agentspeak.Trigger.addition, agentspeak.GoalType.belief,
+                agentspeak.Literal("jag_shutting_down", (deadline,)),
+                agentspeak.runtime.Intention(),
+            )
+        loop.call_later(deadline, lambda: loop.create_task(target.stop()))
+    else:
+        loop.create_task(target.stop())
+
     yield
 
 
@@ -565,6 +666,26 @@ def _drop_event(agent, term, intention):
 def _drop_all_events(agent, term, intention):
     # Since python-agentspeak does not have a persistent event queue,
     # there are no pending events to drop.
+    yield
+
+
+@actions.add(".perceive", 0)  # Enric
+def _perceive(agent, term, intention):
+    """.perceive
+
+    In Jason, perception can run at a lower frequency than the reasoning
+    cycle, so .perceive forces an immediate, out-of-cycle perception pass
+    over the environment. There is no equivalent lag here to force: under
+    spade_bdi, percept beliefs are set from outside the agent (typically
+    via BDIBehaviour.set_belief/remove_belief -- see the PERCEPT_TAG
+    annotation in bdi.py) into agent.bdi_intention_buffer, which is
+    drained unconditionally on every single reasoning cycle, before
+    Agent.step runs at all. Perception is therefore never behind the
+    reasoning cycle to begin with, so, exactly like .drop_event and
+    .drop_all_events for the (likewise absent) persistent event queue,
+    .perceive is a well-defined no-op here rather than a fabricated
+    synchronisation that would have nothing real to do.
+    """
     yield
 
 
@@ -681,6 +802,103 @@ def _succeed_goal(agent, term, intention):
         # intention is now finished, same as a top-level goal completing.
 
     agent.intentions = kept
+    yield
+
+
+_AT_WHEN_RE = re.compile(
+    r"^\s*now\s*\+\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*$", re.IGNORECASE)
+
+_AT_UNIT_SECONDS = {
+    # A bare number with no unit means milliseconds, matching Jason's .at.
+    "": 0.001,
+    "ms": 0.001, "milli": 0.001, "millis": 0.001,
+    "millisecond": 0.001, "milliseconds": 0.001,
+    "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
+    "m": 60.0, "min": 60.0, "mins": 60.0, "minute": 60.0, "minutes": 60.0,
+    "h": 3600.0, "hour": 3600.0, "hours": 3600.0,
+    "d": 86400.0, "day": 86400.0, "days": 86400.0,
+}
+
+
+def _parse_at_when(when):
+    """Parse a Jason-style .at delay spec: "now +<number> [<unit>]".
+
+    Supported units: (s)econd(s), (m)inute(s), (h)our(s), (d)ay(s); a bare
+    number with no unit means milliseconds. Returns the delay in seconds.
+    """
+    match = _AT_WHEN_RE.match(when)
+    if not match:
+        raise agentspeak.AslError(
+            "expected .at time spec of the form 'now +<number> [s|m|h|d]', got: '%s'" % when)
+
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    try:
+        seconds_per_unit = _AT_UNIT_SECONDS[unit]
+    except KeyError:
+        raise agentspeak.AslError("unknown time unit in .at: '%s'" % unit)
+
+    return amount * seconds_per_unit
+
+
+@actions.add(".at", 2)  # Enric
+def _at(agent, term, intention):
+    """.at(When, Event)
+
+    Schedule Event to be generated at some point in the future, as
+    described by When -- a string of the form "now +<number> [s|m|h|d]",
+    matching Jason's .at (e.g. "now +3 seconds", "now +2 h").
+
+    This is a deliberate departure from Jason's own syntax: Jason's .at
+    takes the event as a quoted `{+!g}` term, a syntax python-agentspeak's
+    grammar does not support in term position. Instead -- exactly as
+    .wait's optional event argument and .relevant_plans's trigger argument
+    already do -- Event is given as a plain string (e.g. "+!g", "-belief")
+    and parsed with the interpreter's own event grammar.
+
+    There is no persistent, agent-cycle-driven scheduler to hook into:
+    python-agentspeak's reasoning cycle only polls per-intention .wait
+    timers (see Agent.step), not agent-wide deferred events, and the
+    project's scope keeps this port confined to the standard-library
+    module rather than extending Agent/Environment. So, exactly like
+    .create_agent already does for spawning a platform agent
+    asynchronously, firing the event is handed to the asyncio event loop
+    that is already driving the agent's reasoning cycle, via
+    loop.call_later. This means the event fires out of line with the plan
+    that scheduled it, and -- like .create_agent -- any failure (e.g. no
+    applicable plan when the event fires) surfaces separately rather than
+    as an immediate error to the calling plan.
+    """
+    import asyncio
+    import functools
+
+    when = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+    event_str = agentspeak.asl_str(agentspeak.grounded(term.args[1], intention.scope))
+
+    delay = _parse_at_when(when)
+
+    if not event_str.endswith("."):
+        event_str += "."
+    log = agentspeak.Log(LOGGER, 1)
+    tokens = agentspeak.lexer.TokenStream(agentspeak.StringSource("<.at>", event_str), log)
+    tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
+    if tok.lexeme != ".":
+        raise log.error("expected no further tokens after event for .at, got: '%s'", tok.lexeme, loc=tok.loc)
+    event = ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
+
+    # Freeze now: intention.scope may no longer be meaningful once the
+    # callback actually fires, out of line with this action call.
+    frozen_head = agentspeak.freeze(event.head, intention.scope, {})
+
+    loop = asyncio.get_running_loop()
+    loop.call_later(
+        delay,
+        functools.partial(
+            agent.call, event.trigger, event.goal_type, frozen_head,
+            agentspeak.runtime.Intention(), delayed=True,
+        ),
+    )
+
     yield
 
 
