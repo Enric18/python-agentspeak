@@ -36,10 +36,12 @@ LOGGER = agentspeak.get_logger(__name__)
 
 # TODO:
 # * Plan Library Manipulation
-#   - .add_plan
-#   - .plan_label
-#   - .relevant_plans
-#   - .remove_plan
+#   - .add_plan             #Enric
+#   - .plan_label           #Enric
+#   - .relevant_plans       #Enric
+#   - .relevant_plan        #Enric
+#   - .remove_plan          #Enric
+#   - .list_plans           #Enric
 # * BDI
 #   - .current_intention    #Enric
 #   - .desire               #Enric
@@ -51,12 +53,16 @@ LOGGER = agentspeak.get_logger(__name__)
 #   - .drop_intention       #Enric
 #   - .fail_goal            #Enric
 #   - .intend               #Enric
+#   - .intention             #Enric
 #   - .succeed_goal         #Enric
 #   - .add_anot / .add_annot #Enric
 #   - .at                   #Enric
 #   - .create_agent         #Enric
 #   - .kill_agent           #Enric
 #   - .perceive             #Enric
+#   - .suspend               #Enric
+#   - .resume                #Enric
+#   - .suspended              #Enric
 
 
 actions = agentspeak.Actions()
@@ -805,6 +811,170 @@ def _succeed_goal(agent, term, intention):
     yield
 
 
+_SUSPEND_REASON = "suspended"  # Enric: tag for waiters .suspend itself set
+
+
+@actions.add(".suspend", 0)  # Enric
+@actions.add(".suspend", 1)  # Enric
+def _suspend(agent, term, intention):
+    """.suspend[(Goal)]
+
+    Suspend the intention(s) pursuing Goal -- or, with no argument, the
+    intention that is itself calling .suspend -- so Agent.step skips them
+    entirely until a matching .resume(Goal). Goal lookup (when given)
+    mirrors .drop_intention/.fail_goal/.succeed_goal: a stack counts as a
+    target if Goal is the head_term of any of its frames, and the block
+    is applied to the stack's top frame, the only one Agent.step ever
+    inspects for scheduling.
+
+    Reuses the interpreter's own blocking primitive, Intention.waiter --
+    the same one .wait sets -- rather than inventing a separate mechanism:
+    a Waiter with no timeout and no event is never woken by either of its
+    two wake-up paths (Waiter.poll's timeout check, and the event-match
+    scan in Agent.call), so the intention stays blocked until .resume
+    clears the waiter itself. Unlike .fail_goal's self-case, this is safe
+    to do directly on the calling intention too: Agent.step only
+    overwrites an intention's .instr after its action call returns, never
+    its .waiter.
+
+    The reason .suspended/2 later reports is stashed as a plain attribute
+    on the Waiter object (it defines no __slots__), tagging it as
+    .suspend's own doing rather than an ordinary .wait.
+    """
+    if len(term.args) == 1:
+        goal = agentspeak.freeze(term.args[0], intention.scope, {})
+        targets = [
+            stack[-1] for stack in agent.intentions
+            if stack and any(item.head_term == goal for item in stack)
+        ]
+    else:
+        targets = [intention]
+
+    for target in targets:
+        waiter = agentspeak.runtime.Waiter()
+        waiter.reason = _SUSPEND_REASON
+        target.waiter = waiter
+
+    yield
+
+
+@actions.add(".resume", 1)  # Enric
+def _resume(agent, term, intention):
+    """.resume(Goal)
+
+    Resume the intention(s) previously suspended, while pursuing Goal, by
+    .suspend -- mirrors Jason's .resume(Goal). Goal lookup mirrors
+    .suspend. Only clears waiters tagged with .suspend's own reason: an
+    intention genuinely blocked inside .wait is left alone, since forcing
+    it to resume early would not match .wait's own semantics -- .resume
+    only ever undoes what .suspend did.
+    """
+    goal = agentspeak.freeze(term.args[0], intention.scope, {})
+
+    for stack in agent.intentions:
+        if not stack or not any(item.head_term == goal for item in stack):
+            continue
+        top = stack[-1]
+        if top.waiter is not None and getattr(top.waiter, "reason", None) == _SUSPEND_REASON:
+            top.waiter = None
+
+    yield
+
+
+@actions.add(".suspended", 2)  # Enric
+def _suspended(agent, term, intention):
+    """.suspended(Goal, Reason)
+
+    Test whether Goal belongs to a currently-blocked intention (Goal
+    lookup mirrors .suspend/.resume), unifying Reason with why: "suspended"
+    for an explicit .suspend, or "wait" for an intention genuinely blocked
+    inside .wait. Mirrors Jason's .suspended(G, R); a test predicate, not
+    backtracking, matching the reference documentation.
+    """
+    goal = agentspeak.freeze(term.args[0], intention.scope, {})
+
+    for stack in agent.intentions:
+        if not stack or not any(item.head_term == goal for item in stack):
+            continue
+        top = stack[-1]
+        if top.waiter is not None:
+            reason = getattr(top.waiter, "reason", "wait")
+            if agentspeak.unify(term.args[1], Literal(reason), intention.scope, intention.stack):
+                yield
+            return
+
+
+@actions.add(".intention", 2)  # Enric
+@actions.add(".intention", 3)  # Enric
+@actions.add(".intention", 4)  # Enric
+def _intention(agent, term, intention):
+    """.intention(ID, State[, Stack[, current]])
+
+    Describe the agent's own intentions, backtracking over every
+    top-level intention stack in agent.intentions -- ID/State/Stack may be
+    left unbound to enumerate, or bound to filter. Mirrors Jason's
+    .intention(ID, STATE, STACK, current), adapted to what this engine
+    actually tracks:
+
+    - ID is id(stack), the same intention-identifier convention .intend
+      already established.
+    - State is one of "suspended" (blocked by .suspend), "waiting"
+      (blocked for any other reason, e.g. .wait), or "running" (not
+      blocked) -- Jason's own state set is richer, but these three are
+      everything Agent.step actually distinguishes when deciding what to
+      schedule next.
+    - Stack, when requested, is the list of goals this intention is
+      pursuing, outermost first: each frame's head_term, bottom to top.
+      Jason's own Stack holds full im(plan_label, trigger, body, unifier)
+      records, but an Intention frame here does not retain which Plan
+      object produced it, so a faithful im/4 term cannot be reconstructed
+      without extending the runtime -- out of scope for a
+      standard-library-only port (see the project's design notes) -- so
+      goal identity is what is exposed instead.
+    - The optional 4th argument, if given, must be the atom `current`;
+      Jason: "the intention executing the plan is used as current" --
+      here, the stack the calling intention itself belongs to.
+    """
+    only_current = False
+    if len(term.args) == 4:
+        current_flag = agentspeak.grounded(term.args[3], intention.scope)
+        if not (agentspeak.is_atom(current_flag) and current_flag.functor == "current"):
+            raise agentspeak.AslError(
+                "expected the atom 'current' as the 4th argument to .intention")
+        only_current = True
+
+    choicepoint = object()
+    for stack in agent.intentions:
+        if not stack:
+            continue
+        if only_current and intention not in stack:
+            continue
+
+        top = stack[-1]
+        if top.waiter is None:
+            state = "running"
+        elif getattr(top.waiter, "reason", None) == _SUSPEND_REASON:
+            state = "suspended"
+        else:
+            state = "waiting"
+
+        intention.stack.append(choicepoint)
+
+        bound = (
+            agentspeak.unify(term.args[0], id(stack), intention.scope, intention.stack)
+            and agentspeak.unify(term.args[1], Literal(state), intention.scope, intention.stack)
+        )
+
+        if bound and len(term.args) >= 3:
+            goals = tuple(frame.head_term for frame in stack if frame.head_term is not None)
+            bound = agentspeak.unify(term.args[2], goals, intention.scope, intention.stack)
+
+        if bound:
+            yield
+
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
 _AT_WHEN_RE = re.compile(
     r"^\s*now\s*\+\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*$", re.IGNORECASE)
 
@@ -969,6 +1139,32 @@ def _remove_plan(agent, term, intention):
     yield
 
 
+def _plans_for_trigger(agent, intention, trigger_str):
+    """Parse a trigger-event string (e.g. "+!task") and return the plan
+    objects relevant to it: same trigger/goal type, head unifies with the
+    event head. Shared by .relevant_plans, .relevant_plan and .list_plans.
+    """
+    if not trigger_str.endswith("."):
+        trigger_str += "."
+
+    log = agentspeak.Log(LOGGER, 1)
+    tokens = agentspeak.lexer.TokenStream(
+        agentspeak.StringSource("<.relevant_plan(s)>", trigger_str), log)
+    tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
+    if tok.lexeme != ".":
+        raise log.error(
+            "expected a single triggering event, got: '%s'", tok.lexeme, loc=tok.loc)
+    event = ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
+
+    frozen = agentspeak.freeze(event.head, intention.scope, {})
+    key = (event.trigger, event.goal_type, frozen.functor, len(frozen.args))
+
+    return [
+        plan for plan in agent.plans[key]
+        if agentspeak.unifies_annotated(plan.head, frozen)
+    ]
+
+
 @actions.add(".relevant_plans", 2)  # Enric
 def _relevant_plans(agent, term, intention):
     """.relevant_plans(TriggerString, Plans)
@@ -978,30 +1174,56 @@ def _relevant_plans(agent, term, intention):
     the same trigger/goal type and its head unifies with the event head.
     """
     trigger_str = asl_str(agentspeak.grounded(term.args[0], intention.scope))
-    if not trigger_str.endswith("."):
-        trigger_str += "."
-
-    log = agentspeak.Log(LOGGER, 1)
-    tokens = agentspeak.lexer.TokenStream(
-        agentspeak.StringSource("<.relevant_plans>", trigger_str), log)
-    tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
-    if tok.lexeme != ".":
-        raise log.error(
-            "expected a single triggering event for .relevant_plans, got: '%s'",
-            tok.lexeme, loc=tok.loc)
-    event = ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
-
-    frozen = agentspeak.freeze(event.head, intention.scope, {})
-    key = (event.trigger, event.goal_type, frozen.functor, len(frozen.args))
-
-    result = tuple(
-        _plan_to_str(plan)
-        for plan in agent.plans[key]
-        if agentspeak.unifies_annotated(plan.head, frozen)
-    )
+    result = tuple(_plan_to_str(plan) for plan in _plans_for_trigger(agent, intention, trigger_str))
 
     if agentspeak.unify(term.args[1], result, intention.scope, intention.stack):
         yield
+
+
+@actions.add(".relevant_plan", 2)  # Enric
+def _relevant_plan(agent, term, intention):
+    """.relevant_plan(TriggerString, Plan)
+
+    Backtracking counterpart of .relevant_plans: instead of collecting every
+    relevant plan into one list, unify Plan with each relevant plan in turn,
+    one per backtrack. Mirrors Jason's .relevant_plan(Trigger, Plan) -- e.g.
+    .findall(P, .relevant_plan("+!go", P), L) is equivalent to
+    .relevant_plans("+!go", L).
+    """
+    trigger_str = asl_str(agentspeak.grounded(term.args[0], intention.scope))
+    plans = _plans_for_trigger(agent, intention, trigger_str)
+
+    choicepoint = object()
+    for plan in plans:
+        intention.stack.append(choicepoint)
+        if agentspeak.unify(term.args[1], _plan_to_str(plan), intention.scope, intention.stack):
+            yield
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
+@actions.add(".list_plans", 0)  # Enric
+@actions.add(".list_plans", 1)  # Enric
+def _list_plans(agent, term, intention):
+    """.list_plans[(TriggerString)]
+
+    Print every plan in the plan library, one per line, in AgentSpeak
+    source form. With an optional TriggerString filter (same string format
+    as .relevant_plans/.relevant_plan), only plans relevant to that
+    triggering event are printed. Mirrors Jason's .list_plans[(trigger)];
+    a debug aid like .dump/.control_flow, so it prints directly rather
+    than going through the agent-tagged .print.
+    """
+    if len(term.args) == 1:
+        trigger_str = asl_str(agentspeak.grounded(term.args[0], intention.scope))
+        plans = _plans_for_trigger(agent, intention, trigger_str)
+    else:
+        plans = [plan for plan_list in agent.plans.values() for plan in plan_list]
+
+    LOGGER.info("Plans")
+    for plan in plans:
+        print(_plan_to_str(plan))
+
+    yield
 
 
 @actions.add(".plan_label", 2)  # Enric
