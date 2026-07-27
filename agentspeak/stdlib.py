@@ -42,6 +42,13 @@ LOGGER = agentspeak.get_logger(__name__)
 #   - .relevant_plan        #Enric
 #   - .remove_plan          #Enric
 #   - .list_plans           #Enric
+# * Belief Base
+#   - .belief                #Enric
+#   - .count                 (Base -- already implemented)
+#   - .namespace              #Enric
+#   - .relevant_rules         #Enric
+#   - .list_rules             #Enric
+#   - .setof                  #Enric
 # * BDI
 #   - .current_intention    #Enric
 #   - .desire               #Enric
@@ -356,6 +363,108 @@ def _abolish(agent, term, intention):
             group.remove(old_belief)
 
     yield
+
+
+@actions.add(".belief", 1)  # Enric
+def _belief(agent, term, intention):
+    """.belief(Bel)
+
+    Test/enumerate Bel against the belief base only, excluding rules and
+    rule-derived inference -- unlike an ordinary ?Bel or plan-context
+    query (TermQuery), which also consults agent.rules. Mirrors Jason's
+    .belief(+/-Bel): "considers only the set of beliefs in the BB."
+    """
+    pattern = agentspeak.evaluate(term.args[0], intention.scope)
+    try:
+        group = pattern.literal_group()
+    except AttributeError:
+        raise agentspeak.AslError("expected a literal for .belief, got: '%s'" % pattern)
+
+    for belief in agent.beliefs[group]:
+        for _ in agentspeak.unify_annotated(pattern, belief, intention.scope, intention.stack):
+            yield
+
+
+@actions.add(".namespace", 1)  # Enric
+def _namespace(agent, term, intention):
+    """.namespace(X)
+
+    Test whether X names a namespace. python-agentspeak has no namespace
+    ("::") syntax at all -- it appears nowhere in the lexer, parser or
+    runtime -- so no term is ever a namespace here. This is a well-defined
+    "always fails" fallback, the same reasoning already used for
+    .drop_event and .perceive where the reference feature has no
+    machinery in this engine to attach to. Kept as a real action (rather
+    than left unimplemented) purely for signature parity with Jason's
+    .namespace(Arg).
+    """
+    return
+    yield
+
+
+@actions.add(".relevant_rules", 2)  # Enric
+def _relevant_rules(agent, term, intention):
+    """.relevant_rules(Literal, Rules)
+
+    Unify Rules with the list of rules (rendered as strings) whose head
+    has the same functor/arity as Literal and unifies with it. Mirrors
+    Jason's .relevant_rules(p(_), LP). Companion to .relevant_plans, but
+    over agent.rules instead of agent.plans -- rules have no trigger/goal
+    type to index by, just (functor, arity).
+    """
+    pattern = agentspeak.freeze(term.args[0], intention.scope, {})
+    if not agentspeak.is_literal(pattern):
+        raise agentspeak.AslError(
+            "expected a literal for .relevant_rules, got: '%s'" % pattern)
+
+    key = (pattern.functor, len(pattern.args))
+    result = tuple(
+        str(rule) for rule in agent.rules[key]
+        if agentspeak.unifies_annotated(rule.head, pattern)
+    )
+
+    if agentspeak.unify(term.args[1], result, intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".list_rules", 0)  # Enric
+def _list_rules(agent, term, intention):
+    """.list_rules
+
+    Print every rule in the belief base, one per line (Rule.__str__
+    already renders as "head :- query"). Mirrors Jason's .list_rules; a
+    debug aid like .dump/.list_plans, so it prints directly rather than
+    through the agent-tagged .print.
+    """
+    LOGGER.info("Rules")
+    for rules in agent.rules.values():
+        for rule in rules:
+            print(rule)
+    yield
+
+
+@actions.add(".setof", 3)  # Enric
+def _setof(agent, term, intention):
+    """.setof(Term, Query, List)
+
+    Like .findall(Term, Query, List), but deduplicated and sorted --
+    mirrors both Jason's .setof ("the result set populated with found
+    solutions", as opposed to .findall's bag of all solutions including
+    duplicates) and the classic Prolog setof/findall distinction. Term
+    and Query use the same TermQuery-based belief/rule lookup .findall
+    already uses -- like .findall, Query cannot itself be a nested
+    internal-action call in this fork (see .relevant_plan's notes).
+    """
+    pattern = agentspeak.evaluate(term.args[0], intention.scope)
+    query = agentspeak.runtime.TermQuery(term.args[1])
+
+    memo = {}
+    result = []
+    for _ in query.execute(agent, intention):
+        result.append(agentspeak.freeze(pattern, intention.scope, memo))
+
+    if agentspeak.unify(tuple(sorted(set(result))), term.args[2], intention.scope, intention.stack):
+        yield
 
 
 @actions.add(".date", 3)
