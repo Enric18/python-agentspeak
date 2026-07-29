@@ -42,6 +42,18 @@ LOGGER = agentspeak.get_logger(__name__)
 #   - .relevant_plan        #Enric
 #   - .remove_plan          #Enric
 #   - .list_plans           #Enric
+# * Lists and Strings
+#   - .delete                 #Enric
+#   - .empty                  #Enric
+#   - .reverse                #Enric
+#   - .shuffle                #Enric
+#   - .nth                    (Base -- already implemented)
+#   - .suffix                 #Enric
+#   - .prefix                 #Enric
+#   - .sublist                #Enric
+#   - .difference             #Enric
+#   - .intersection           #Enric
+#   - .union                  #Enric
 # * Belief Base
 #   - .belief                #Enric
 #   - .count                 (Base -- already implemented)
@@ -272,6 +284,280 @@ def _member(agent, term, intention):
         agentspeak.reroll(intention.scope, intention.stack, choicepoint)
 
 
+def _delete_range(target, start, end):
+    """Shared by both .delete arities: remove the half-open index range
+    [start, end) from a list or a string. Matches Jason's own delete.java
+    exactly (deleteFromList/deleteFromString there use the same half-open
+    convention: .delete(1,3,[a,b,c,a],L) keeps indices 0 and 3, unifying L
+    with [a,a]).
+    """
+    if agentspeak.is_string(target):
+        # Java's String.substring throws (caught, returns unchanged) for a
+        # negative index; Python slicing instead reinterprets a negative
+        # index as counting from the end, which would silently do
+        # something different. Guard explicitly rather than inherit that
+        # mismatch; an end/start past the string's length is already
+        # handled the same way by both languages (Python's slicing clips,
+        # Java's exception is caught and returns the string unchanged).
+        if start < 0 or end < 0:
+            return target
+        return target[:start] + target[end:]
+    elif agentspeak.is_list(target):
+        return tuple(item for i, item in enumerate(target) if i < start or i >= end)
+    else:
+        raise agentspeak.AslError(
+            "expected a list or string target for .delete, got: '%s'" % (target,))
+
+
+@actions.add(".delete", 3)  # Enric
+@actions.add(".delete", 4)  # Enric
+def _delete(agent, term, intention):
+    """.delete(Arg0, Target, Result) or .delete(Start, End, Target, Result)
+
+    Mirrors Jason's .delete exactly: one action, sharing the same name
+    across both arities (not two independent list/string actions), which
+    dispatches on the runtime type of its first argument(s) rather than
+    on target type alone:
+
+    - 4 args: Start and End are both numbers -- delete the half-open
+      index range [Start, End) from Target (a list or a string).
+    - 3 args, Arg0 a number: delete a single element/character at index
+      Arg0 (equivalent to the 4-arg form with End = Arg0 + 1).
+    - 3 args, Arg0 a string: Target must also be a string; delete every
+      occurrence of the substring Arg0 from it. Jason's own
+      implementation does this via Java's String.replaceAll, which --
+      easy to miss -- treats Arg0 as a *regex*, not a literal substring;
+      a substring containing regex metacharacters (".", "*", "(", ...)
+      would be interpreted as a pattern there. That reads as an
+      implementation accident rather than the intended semantics (the
+      documentation only ever says "substring"), so this port uses a
+      plain literal replace instead, deliberately diverging from the
+      reference implementation's literal behaviour to match its
+      documented intent.
+    - 3 args, Arg0 anything else (atom, literal, structure): Target must
+      be a list; delete every element that unifies with Arg0 (full
+      unification, not just equality, matching Jason's own
+      un.unifies(element, t) check -- e.g. an Arg0 containing variables
+      can match structurally, not just identical ground terms).
+
+    In every case Result unifies with the list/string after deletion;
+    like any unification, giving a Result that does not match what
+    deletion actually produces simply fails
+    (.delete(a,[a,b,c,a],[c]) fails, it does not raise an error).
+    """
+    args = term.args
+
+    if len(args) == 4:
+        start = agentspeak.grounded(args[0], intention.scope)
+        end = agentspeak.grounded(args[1], intention.scope)
+        target = agentspeak.grounded(args[2], intention.scope)
+        result_arg = args[3]
+        if not (agentspeak.is_number(start) and agentspeak.is_number(end)):
+            raise agentspeak.AslError("expected numeric Start/End for .delete/4")
+        result = _delete_range(target, int(start), int(end))
+    else:
+        arg0 = agentspeak.grounded(args[0], intention.scope)
+        target = agentspeak.grounded(args[1], intention.scope)
+        result_arg = args[2]
+
+        if agentspeak.is_number(arg0):
+            start = int(arg0)
+            result = _delete_range(target, start, start + 1)
+        elif agentspeak.is_string(arg0):
+            if not agentspeak.is_string(target):
+                raise agentspeak.AslError(
+                    "expected a string target for .delete when the first argument is a string")
+            result = target.replace(arg0, "")
+        else:
+            if not agentspeak.is_list(target):
+                raise agentspeak.AslError(
+                    "expected a list target for .delete when the first argument is a term")
+            result = tuple(item for item in target if not agentspeak.unifies(arg0, item))
+
+    if agentspeak.unify(result, result_arg, intention.scope, intention.stack):
+        yield
+
+
+def _list_or_string(agent, term_arg, intention, action_name):
+    value = agentspeak.grounded(term_arg, intention.scope)
+    if not (agentspeak.is_list(value) or agentspeak.is_string(value)):
+        raise agentspeak.AslError(
+            "expected a list or string for %s, got: '%s'" % (action_name, value))
+    return value
+
+
+@actions.add(".empty", 1)  # Enric
+def _empty(agent, term, intention):
+    """.empty(X)
+
+    Test whether the list or string X has no elements/characters. Mirrors
+    Jason's .empty(Arg): "checks whether the argument does not have any
+    term."
+    """
+    value = _list_or_string(agent, term.args[0], intention, ".empty")
+    if len(value) == 0:
+        yield
+
+
+@actions.add(".reverse", 2)  # Enric
+def _reverse(agent, term, intention):
+    """.reverse(X, Result)
+
+    Unify Result with X (a list or a string) reversed. Mirrors Jason's
+    .reverse(Arg, Reversed). Jason's own third example reverses an *open*
+    list with a free tail variable ([a,b,c|T]), keeping the tail in
+    place; this fork's lists have no such open/cons-with-tail-variable
+    syntax at all, so only plain, fully-ground lists and strings are
+    supported here.
+    """
+    value = _list_or_string(agent, term.args[0], intention, ".reverse")
+    if agentspeak.is_string(value):
+        result = value[::-1]
+    else:
+        result = tuple(reversed(value))
+
+    if agentspeak.unify(result, term.args[1], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".shuffle", 2)  # Enric
+def _shuffle(agent, term, intention):
+    """.shuffle(List, Result)
+
+    Unify Result with List in some random order. Mirrors Jason's
+    .shuffle(List, Var); like .random, this is a single-shot draw (one
+    random permutation per call), not backtracking over every possible
+    permutation.
+    """
+    value = agentspeak.grounded(term.args[0], intention.scope)
+    if not agentspeak.is_list(value):
+        raise agentspeak.AslError("expected a list for .shuffle, got: '%s'" % (value,))
+
+    shuffled = list(value)
+    random.shuffle(shuffled)
+
+    if agentspeak.unify(tuple(shuffled), term.args[1], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".suffix", 2)  # Enric
+def _suffix(agent, term, intention):
+    """.suffix(Suffix, List)
+
+    Test/enumerate whether Suffix is a suffix of List (a list or a
+    string). Backtracks from the longest suffix (List itself) down to the
+    empty one, matching Jason's own documented order for
+    .suffix(Suffix, List) exactly:
+    .suffix(X,[a,b,c]) unifies X with [a,b,c], [b,c], [c], [] in that order.
+    """
+    value = _list_or_string(agent, term.args[1], intention, ".suffix")
+
+    choicepoint = object()
+    for i in range(len(value) + 1):
+        intention.stack.append(choicepoint)
+        if agentspeak.unify(term.args[0], value[i:], intention.scope, intention.stack):
+            yield
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
+@actions.add(".prefix", 2)  # Enric
+def _prefix(agent, term, intention):
+    """.prefix(Prefix, List)
+
+    Test/enumerate whether Prefix is a prefix of List (a list or a
+    string). Backtracks from the longest prefix (List itself) down to the
+    empty one -- Jason's own documentation is explicit that this is
+    deliberately the opposite of the usual logic-programming convention
+    of increasing length, and this mirrors that choice exactly:
+    .prefix(X,[a,b,c]) unifies X with [a,b,c], [a,b], [a], [] in that order.
+    """
+    value = _list_or_string(agent, term.args[1], intention, ".prefix")
+
+    choicepoint = object()
+    for i in range(len(value), -1, -1):
+        intention.stack.append(choicepoint)
+        if agentspeak.unify(term.args[0], value[:i], intention.scope, intention.stack):
+            yield
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
+@actions.add(".sublist", 2)  # Enric
+def _sublist(agent, term, intention):
+    """.sublist(Sublist, List)
+
+    Test/enumerate whether Sublist is a *contiguous* sublist of List (a
+    list or a string) -- not an arbitrary subset. Mirrors Jason's own
+    .sublist(S, L) exactly, including its documented enumeration order
+    (prefixes of List, then prefixes of each successive suffix of List,
+    and finally the empty sublist):
+    .sublist(X,[a,b,c]) unifies X with [a,b,c], [a,b], [a], [b,c], [b], [c], []
+    in that order.
+    """
+    value = _list_or_string(agent, term.args[1], intention, ".sublist")
+
+    def _sublists():
+        n = len(value)
+        for start in range(n):
+            for end in range(n, start, -1):
+                yield value[start:end]
+        yield value[0:0]
+
+    choicepoint = object()
+    for sub in _sublists():
+        intention.stack.append(choicepoint)
+        if agentspeak.unify(term.args[0], sub, intention.scope, intention.stack):
+            yield
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
+def _as_two_lists(term, intention, action_name):
+    s1 = agentspeak.grounded(term.args[0], intention.scope)
+    s2 = agentspeak.grounded(term.args[1], intention.scope)
+    if not (agentspeak.is_list(s1) and agentspeak.is_list(s2)):
+        raise agentspeak.AslError("expected two lists for %s" % action_name)
+    return s1, s2
+
+
+@actions.add(".difference", 3)  # Enric
+def _difference(agent, term, intention):
+    """.difference(S1, S2, S3)
+
+    Unify S3 with the elements of S1 (represented as a list) that are not
+    in S2, treated as sets: deduplicated and sorted. Mirrors Jason's
+    .difference(S1, S2, S3): "the result set is sorted."
+    """
+    s1, s2 = _as_two_lists(term, intention, ".difference")
+    result = tuple(sorted(set(s1) - set(s2)))
+    if agentspeak.unify(result, term.args[2], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".intersection", 3)  # Enric
+def _intersection(agent, term, intention):
+    """.intersection(S1, S2, S3)
+
+    Unify S3 with the elements common to both S1 and S2 (lists treated as
+    sets): deduplicated and sorted. Mirrors Jason's .intersection(S1, S2, S3).
+    """
+    s1, s2 = _as_two_lists(term, intention, ".intersection")
+    result = tuple(sorted(set(s1) & set(s2)))
+    if agentspeak.unify(result, term.args[2], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".union", 3)  # Enric
+def _union(agent, term, intention):
+    """.union(S1, S2, S3)
+
+    Unify S3 with every element in S1 or S2 (lists treated as sets):
+    deduplicated and sorted. Mirrors Jason's .union(S1, S2, S3).
+    """
+    s1, s2 = _as_two_lists(term, intention, ".union")
+    result = tuple(sorted(set(s1) | set(s2)))
+    if agentspeak.unify(result, term.args[2], intention.scope, intention.stack):
+        yield
+
+
 actions.add_predicate(".atom", (None, ), agentspeak.is_atom)
 actions.add_predicate(".literal", (None, ), agentspeak.is_literal)
 actions.add_predicate(".list", (None, ), agentspeak.is_list)
@@ -497,6 +783,24 @@ def _time(agent, term, intention):
         yield
 
 
+def _parse_event_spec(source_name, event_str):
+    """Parse an event-spec string (e.g. "+!g(1,2)", "-belief") into an
+    Event(trigger, goal_type, head), reusing the interpreter's own event
+    grammar. Shared by .wait's optional event argument, .at, .drop_event
+    and .drop_all_events's matching -- python-agentspeak's grammar has no
+    quoted-event term syntax (Jason's own {+!g}), so this string-based
+    adaptation is used throughout instead.
+    """
+    if not event_str.endswith("."):
+        event_str += "."
+    log = agentspeak.Log(LOGGER, 1)
+    tokens = agentspeak.lexer.TokenStream(agentspeak.StringSource(source_name, event_str), log)
+    tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
+    if tok.lexeme != ".":
+        raise log.error("expected no further tokens after event, got: '%s'", tok.lexeme, loc=tok.loc)
+    return ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
+
+
 @actions.add(".wait", 1)
 @actions.add(".wait", 2)
 @agentspeak.optimizer.all_bound
@@ -521,17 +825,7 @@ def _wait(agent, term, intention):
 
     # Event.
     if event is not None:
-        # Parse event.
-        if not event.endswith("."):
-            event += "."
-        log = agentspeak.Log(LOGGER, 1)
-        tokens = agentspeak.lexer.TokenStream(agentspeak.StringSource("<.wait>", event), log)
-        tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
-        if tok.lexeme != ".":
-            raise log.error("expected no further tokens after event for .wait, got: '%s'", tok.lexeme, loc=tok.loc)
-
-        # Build term.
-        event = ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
+        event = _parse_event_spec("<.wait>", event)
 
     # Timeout.
     if millis is None:
@@ -656,24 +950,84 @@ def _intend(agent, term, intention):
             
             agentspeak.reroll(intention.scope, intention.stack, choicepoint)
 
+def _is_pending_desire(pending):
+    return (
+        pending.goal_type == agentspeak.GoalType.achievement
+        and pending.trigger == agentspeak.Trigger.addition
+    )
+
+
 @actions.add(".desire") #Enric
 def _desire(agent, term, intention):
-    # In python-agentspeak, desires and intentions are equivalent
-    # since there is no persistent event queue.
+    """.desire(Goal[, Id])
+
+    Test/enumerate whether Goal is desired: either still a pending,
+    not-yet-committed achievement event sitting in agent.events (a real
+    desire now that the interpreter has a persistent event queue), or
+    already an intention (an intention is still a desire being pursued,
+    matching real BDI terminology -- .desire is a strict superset of what
+    .intend checks). The optional 2-arg Id-unifying form is
+    intention-only, mirroring .intend's own 2-arg contract exactly: a
+    pending event has no id(stack) yet to offer.
+    """
+    if len(term.args) < 1 or len(term.args) > 2:
+        raise agentspeak.AslError("internal action .desire expects 1 or 2 arguments")
+
+    goal_arg = term.args[0]
+    has_intention_var = len(term.args) == 2
+
+    if not has_intention_var:
+        choicepoint = object()
+        for pending in agent.events:
+            if not _is_pending_desire(pending):
+                continue
+
+            intention.stack.append(choicepoint)
+            if agentspeak.unify(goal_arg, pending.frozen, intention.scope, intention.stack):
+                yield
+            agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+    # Already-committed intentions -- an intention is still a desire.
     yield from _intend(agent, term, intention)
 
 
 @actions.add(".drop_desire", 1) #Enric
 def _drop_desire(agent, term, intention):
-    # In python-agentspeak, dropping a desire is equivalent to dropping an intention
-    # since there is no persistent event queue.
+    """.drop_desire(Goal)
+
+    Drop Goal as a desire: remove it from the pending-event queue if it
+    is still only a pending, uncommitted achievement event, and also drop
+    the matching intention if it has already been committed to one
+    (reusing .drop_intention's goal lookup and semantics verbatim for the
+    latter). Both are checked since a goal is only ever in one of the two
+    states at a time, but which one isn't always obvious to the caller.
+    """
+    import collections
+
+    goal = agentspeak.freeze(term.args[0], intention.scope, {})
+
+    agent.events = collections.deque(
+        pending for pending in agent.events
+        if not (_is_pending_desire(pending) and pending.frozen == goal)
+    )
+
     yield from _drop_intention(agent, term, intention)
 
 
 @actions.add(".drop_all_desires", 0) #Enric
 def _drop_all_desires(agent, term, intention):
-    # In python-agentspeak, dropping all desires is equivalent to dropping all intentions
-    # since there is no persistent event queue.
+    """.drop_all_desires
+
+    Drop every desire: clear every pending achievement event (belief
+    events are left alone -- a desire is a goal, not a belief update) and
+    every intention (reusing .drop_all_intentions verbatim).
+    """
+    import collections
+
+    agent.events = collections.deque(
+        pending for pending in agent.events if not _is_pending_desire(pending)
+    )
+
     yield from _drop_all_intentions(agent, term, intention)
 
 
@@ -771,16 +1125,42 @@ def _kill_agent(agent, term, intention):
 
 @actions.add(".drop_event", 1) #Enric
 def _drop_event(agent, term, intention):
-    # Since python-agentspeak does not have a persistent event queue
-    # (events are processed immediately and synchronously),
-    # there are no pending events to drop.
+    """.drop_event(EventSpec)
+
+    Remove every pending event matching EventSpec -- a trigger/goal_type
+    plus a (possibly partial) head, given as a string using the same
+    convention .wait's optional event argument and .at already use (e.g.
+    "+!g(_)", "-belief"). A pending event matches if its trigger and
+    goal_type are equal and its frozen head *unifies* with the parsed
+    head (not plain equality), so unbound variables in EventSpec act as
+    wildcards -- the same convention .relevant_plans's trigger string
+    already uses. Now genuinely functional: with a persistent event queue
+    in place (see Agent.events), there is something real to drop.
+    """
+    import collections
+
+    spec_str = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+    spec = _parse_event_spec("<.drop_event>", spec_str)
+
+    agent.events = collections.deque(
+        pending for pending in agent.events
+        if not (
+            pending.trigger == spec.trigger
+            and pending.goal_type == spec.goal_type
+            and agentspeak.unifies_annotated(pending.frozen, spec.head)
+        )
+    )
     yield
 
 
 @actions.add(".drop_all_events", 0) #Enric
 def _drop_all_events(agent, term, intention):
-    # Since python-agentspeak does not have a persistent event queue,
-    # there are no pending events to drop.
+    """.drop_all_events
+
+    Remove every pending event. Now genuinely functional, for the same
+    reason as .drop_event.
+    """
+    agent.events.clear()
     yield
 
 
@@ -796,10 +1176,9 @@ def _perceive(agent, term, intention):
     annotation in bdi.py) into agent.bdi_intention_buffer, which is
     drained unconditionally on every single reasoning cycle, before
     Agent.step runs at all. Perception is therefore never behind the
-    reasoning cycle to begin with, so, exactly like .drop_event and
-    .drop_all_events for the (likewise absent) persistent event queue,
-    .perceive is a well-defined no-op here rather than a fabricated
-    synchronisation that would have nothing real to do.
+    reasoning cycle to begin with, so .perceive is a well-defined no-op
+    here rather than a fabricated synchronisation that would have nothing
+    real to do.
     """
     yield
 
@@ -810,22 +1189,28 @@ def _fail_goal(agent, term, intention):
 
     Make the intention(s) pursuing Goal fail, as if their plan had failed,
     instead of silently discarding them the way .drop_intention does. Goal
-    lookup mirrors .drop_intention.
+    lookup mirrors .drop_intention -- agent.intentions only: a Goal that
+    is still only a pending, uncommitted desire (see .desire/agent.events)
+    is invisible here, a deliberate scope limit, not a bug -- you can't
+    fail an intention that doesn't exist yet (.drop_event/.drop_desire
+    are what cancel a still-pending goal).
 
-    There is no persistent event queue to dispatch a reference-style
-    "-!goal" recovery plan to (see .drop_event), so the only place a
-    failure can resume is a local if/else already coded around the goal's
-    own achieve call, and that is only available for a *different*
-    intention that is currently idle exactly at Goal's own frame (the top
-    of its stack): there we redirect it to that frame's own failure
-    branch (the else-branch, or simply past the if when there is none).
-    When Goal is buried under active subgoals, or is the goal of the
-    intention that is itself calling .fail_goal, there is no reliable
-    failure branch left to resume -- in the self case, this very call's
-    own continuation would just be overwritten the instant it returns
-    successfully -- so the intention is dropped outright, the same
-    fallback .drop_intention already uses, and the "stop immediately"
-    reading of the self-drop semantics discussed in the design notes.
+    There is no meta-event mechanism to dispatch a reference-style
+    "-!goal" recovery plan to (deliberately out of scope, like the
+    pluggable selection functions Jason calls metareasoning -- see the
+    project notes), so the only place a failure can resume is a local
+    if/else already coded around the goal's own achieve call, and that is
+    only available for a *different* intention that is currently idle
+    exactly at Goal's own frame (the top of its stack): there we redirect
+    it to that frame's own failure branch (the else-branch, or simply
+    past the if when there is none). When Goal is buried under active
+    subgoals, or is the goal of the intention that is itself calling
+    .fail_goal, there is no reliable failure branch left to resume -- in
+    the self case, this very call's own continuation would just be
+    overwritten the instant it returns successfully -- so the intention
+    is dropped outright, the same fallback .drop_intention already uses,
+    and the "stop immediately" reading of the self-drop semantics
+    discussed in the design notes.
     """
     import collections
 
@@ -886,6 +1271,11 @@ def _succeed_goal(agent, term, intention):
     gets a binding for X. If Goal's frame was the last one on its stack,
     the whole intention simply disappears, like a top-level goal that
     finished on its own.
+
+    Goal lookup is agent.intentions only, deliberately: a Goal that is
+    still just a pending, uncommitted desire (see .desire/agent.events)
+    has no frame to succeed yet, so it's invisible here -- .drop_desire
+    is what resolves a still-pending goal instead.
     """
     import collections
 
@@ -934,7 +1324,9 @@ def _suspend(agent, term, intention):
     mirrors .drop_intention/.fail_goal/.succeed_goal: a stack counts as a
     target if Goal is the head_term of any of its frames, and the block
     is applied to the stack's top frame, the only one Agent.step ever
-    inspects for scheduling.
+    inspects for scheduling. agent.intentions only, deliberately: a Goal
+    that is still just a pending, uncommitted desire (see .desire/
+    agent.events) isn't running yet, so there's nothing to suspend.
 
     Reuses the interpreter's own blocking primitive, Intention.waiter --
     the same one .wait sets -- rather than inventing a separate mechanism:
@@ -949,6 +1341,29 @@ def _suspend(agent, term, intention):
     The reason .suspended/2 later reports is stashed as a plain attribute
     on the Waiter object (it defines no __slots__), tagging it as
     .suspend's own doing rather than an ordinary .wait.
+
+    Also raises Jason's own meta-event: <+!g[state(suspended)]> for the
+    goal literal actually transitioning into suspension, fire-and-forget
+    (delayed=True, throwaway calling_intention -- nothing should block on
+    a plan reacting to this -- the same pattern .at's own call() site
+    already uses) through the same agent.events queue, the same
+    select_event, and the same Agent._commit_event plan search as any
+    ordinary event -- no new machinery. Only fired if something genuinely
+    changed state (an already-suspended target is left alone and does
+    NOT re-fire the event): this specifically prevents a plan like
+    "+!g[state(suspended)] <- .suspend(g)." from being a hidden infinite
+    loop -- re-suspending an already-suspended goal is a no-op,
+    notification included.
+
+    NOTE for anyone adding a plan reacting to this: self.plans buckets by
+    (trigger, goal_type, functor, arity) only -- NOT by annotation. An
+    ordinary, unannotated "+!g <- ..." plan of the same functor/arity
+    also unifies against this annotated event (Literal.unify_annotated
+    only requires the PLAN's own annotations, if any, to be present on
+    the event -- zero is trivially satisfied), and Agent._commit_event
+    tries applicable plans in source order, first match wins. Declare
+    "+!g[state(suspended)] <- ..." BEFORE the ordinary "+!g <- ..." plan
+    in the source, or the ordinary plan will win and spuriously re-run.
     """
     if len(term.args) == 1:
         goal = agentspeak.freeze(term.args[0], intention.scope, {})
@@ -957,12 +1372,27 @@ def _suspend(agent, term, intention):
             if stack and any(item.head_term == goal for item in stack)
         ]
     else:
+        goal = intention.head_term  # already frozen -- set by _commit_event
         targets = [intention]
 
+    newly_suspended = False
     for target in targets:
+        already_suspended = (
+            target.waiter is not None
+            and getattr(target.waiter, "reason", None) == _SUSPEND_REASON
+        )
         waiter = agentspeak.runtime.Waiter()
         waiter.reason = _SUSPEND_REASON
         target.waiter = waiter
+        if not already_suspended:
+            newly_suspended = True
+
+    if newly_suspended:
+        agent.call(
+            agentspeak.Trigger.addition, agentspeak.GoalType.achievement,
+            goal.with_annotation(Literal("state", (Literal("suspended"),))),
+            agentspeak.runtime.Intention(), delayed=True,
+        )
 
     yield
 
@@ -973,19 +1403,36 @@ def _resume(agent, term, intention):
 
     Resume the intention(s) previously suspended, while pursuing Goal, by
     .suspend -- mirrors Jason's .resume(Goal). Goal lookup mirrors
-    .suspend. Only clears waiters tagged with .suspend's own reason: an
+    .suspend (agent.intentions only, same reasoning). Only clears waiters
+    tagged with .suspend's own reason: an
     intention genuinely blocked inside .wait is left alone, since forcing
     it to resume early would not match .wait's own semantics -- .resume
     only ever undoes what .suspend did.
+
+    Mirrors .suspend's own meta-event: <+!g[state(resumed)]>, raised
+    fire-and-forget exactly the same way (see .suspend's docstring for
+    the full mechanism and the plan-ordering hazard to be aware of when
+    reacting to it), and only if at least one target's waiter was
+    genuinely tagged _SUSPEND_REASON -- i.e. something actually resumed,
+    symmetric with .suspend's own idempotency guard.
     """
     goal = agentspeak.freeze(term.args[0], intention.scope, {})
 
+    resumed_any = False
     for stack in agent.intentions:
         if not stack or not any(item.head_term == goal for item in stack):
             continue
         top = stack[-1]
         if top.waiter is not None and getattr(top.waiter, "reason", None) == _SUSPEND_REASON:
             top.waiter = None
+            resumed_any = True
+
+    if resumed_any:
+        agent.call(
+            agentspeak.Trigger.addition, agentspeak.GoalType.achievement,
+            goal.with_annotation(Literal("state", (Literal("resumed"),))),
+            agentspeak.runtime.Intention(), delayed=True,
+        )
 
     yield
 
@@ -995,10 +1442,13 @@ def _suspended(agent, term, intention):
     """.suspended(Goal, Reason)
 
     Test whether Goal belongs to a currently-blocked intention (Goal
-    lookup mirrors .suspend/.resume), unifying Reason with why: "suspended"
-    for an explicit .suspend, or "wait" for an intention genuinely blocked
-    inside .wait. Mirrors Jason's .suspended(G, R); a test predicate, not
-    backtracking, matching the reference documentation.
+    lookup mirrors .suspend/.resume: agent.intentions only), unifying
+    Reason with why: "suspended" for an explicit .suspend, or "wait" for
+    an intention genuinely blocked inside .wait. Mirrors Jason's
+    .suspended(G, R); a test predicate, not backtracking, matching the
+    reference documentation. A Goal that is still only a pending,
+    uncommitted desire (see .desire/agent.events) reports false here --
+    it isn't blocked, it just hasn't started yet.
     """
     goal = agentspeak.freeze(term.args[0], intention.scope, {})
 
@@ -1043,6 +1493,10 @@ def _intention(agent, term, intention):
     - The optional 4th argument, if given, must be the atom `current`;
       Jason: "the intention executing the plan is used as current" --
       here, the stack the calling intention itself belongs to.
+
+    Only enumerates agent.intentions, deliberately: pending, uncommitted
+    desires (see .desire/agent.events) aren't intentions yet, so they
+    don't appear here -- check .desire for those.
     """
     only_current = False
     if len(term.args) == 4:
@@ -1155,15 +1609,7 @@ def _at(agent, term, intention):
     event_str = agentspeak.asl_str(agentspeak.grounded(term.args[1], intention.scope))
 
     delay = _parse_at_when(when)
-
-    if not event_str.endswith("."):
-        event_str += "."
-    log = agentspeak.Log(LOGGER, 1)
-    tokens = agentspeak.lexer.TokenStream(agentspeak.StringSource("<.at>", event_str), log)
-    tok, ast_event = agentspeak.parser.parse_event(tokens.next(), tokens, log)
-    if tok.lexeme != ".":
-        raise log.error("expected no further tokens after event for .at, got: '%s'", tok.lexeme, loc=tok.loc)
-    event = ast_event.accept(agentspeak.runtime.BuildEventVisitor(log))
+    event = _parse_event_spec("<.at>", event_str)
 
     # Freeze now: intention.scope may no longer be meaningful once the
     # callback actually fires, out of line with this action call.

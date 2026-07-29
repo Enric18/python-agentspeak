@@ -323,6 +323,29 @@ class Event:
         return "%s%s%s" % (self.trigger.value, self.goal_type.value, self.head)
 
 
+class PendingEvent:
+    """An event waiting in Agent.events to be selected and committed to an
+    intention -- distinct from Event (which only describes a trigger/goal_type/
+    head pattern, e.g. for .wait's event spec). A PendingEvent additionally
+    carries everything Agent._commit_event needs to reproduce, later, exactly
+    what Agent.call used to do inline: frozen is computed eagerly, at enqueue
+    time (the caller's scope keeps mutating afterwards, so the event's content
+    has to be fixed at generation time, same as Jason's own belief update
+    function running immediately while only the reaction is deferred); term is
+    kept alongside, unfrozen, for the calling intention's own back-unification.
+    """
+    def __init__(self, trigger, goal_type, frozen, term, calling_intention, delayed):
+        self.trigger = trigger
+        self.goal_type = goal_type
+        self.frozen = frozen
+        self.term = term
+        self.calling_intention = calling_intention
+        self.delayed = delayed
+
+    def __str__(self):
+        return "%s%s%s" % (self.trigger.value, self.goal_type.value, self.frozen)
+
+
 class Waiter:
     def __init__(self, event=None, until=None):
         self.event = event
@@ -356,6 +379,7 @@ class Agent:
         self.plans = collections.defaultdict(lambda: []) if plans is None else plans
 
         self.intentions = collections.deque()
+        self.events = collections.deque()  # pending PendingEvents, not yet committed to an intention
 
     def dump(self):
         LOGGER.info("Belief base")
@@ -450,12 +474,69 @@ class Agent:
             self._untell_how(term)
             return True
 
-        # If the goal is an achievement and the trigger is an addition, then the agent will add the goal to his list of intentions
+        # Test goals are resolved immediately, never deferred: first try a
+        # matching plan (this fork allows +?goal-style reactive plans, same
+        # as the achievement/belief case below), then fall back to ordinary
+        # belief/rule inference. Unchanged from before the event queue.
+        if goal_type == agentspeak.GoalType.test:
+            applicable_plans = self.plans[
+                (trigger, goal_type, frozen.functor, len(frozen.args))
+            ]
+            intention = Intention()
+            for plan in applicable_plans:
+                for _ in agentspeak.unify_annotated(
+                    plan.head, frozen, intention.scope, intention.stack
+                ):
+                    for _ in plan.context.execute(self, intention):
+                        intention.head_term = frozen
+                        intention.instr = plan.body
+                        intention.calling_term = term
+
+                        if not delayed and self.intentions:
+                            for intention_stack in self.intentions:
+                                if intention_stack[-1] == calling_intention:
+                                    intention_stack.append(intention)
+                                    return True
+
+                        new_intention_stack = collections.deque()
+                        new_intention_stack.append(intention)
+                        self.intentions.append(new_intention_stack)
+                        return True
+            return self.test_belief(term, calling_intention)
+
+        # Everything else that reaches this point -- achievement/addition
+        # events (achievement/removal was already handled by _unachieve,
+        # above) and belief events -- is deferred: enqueued as a
+        # PendingEvent rather than committed to an intention immediately.
+        # Agent.step's commit phase selects and commits one such event per
+        # reasoning cycle (see Agent._commit_event), matching Jason's own
+        # event queue rather than this fork's previous immediate dispatch.
+        pending = PendingEvent(trigger, goal_type, frozen, term, calling_intention, delayed)
+        self.events.append(pending)
+
+        # A non-delayed caller (plain !subgoal, or +bel/-bel) must not run
+        # past this point until its own event is committed -- reuse the
+        # existing Intention.waiter blocking mechanism (the same one
+        # .wait/.suspend already use) rather than inventing a new
+        # Instruction.f return convention. Cleared in _commit_event once
+        # this event is actually serviced.
+        if not delayed:
+            calling_intention.waiter = Waiter()
+            calling_intention.waiter.reason = "pending-event"
+
+        return True
+
+    def _commit_event(self, pending):
+        """Select one PendingEvent (called from Agent.step's commit phase)
+        and either attach a new intention for it or drop it -- reproducing
+        exactly what Agent.call used to do inline before events were
+        deferred, just reading from the PendingEvent instead of locals.
+        """
+        frozen = pending.frozen
         applicable_plans = self.plans[
-            (trigger, goal_type, frozen.functor, len(frozen.args))
+            (pending.trigger, pending.goal_type, frozen.functor, len(frozen.args))
         ]
         intention = Intention()
-        # Find matching plan.
         for plan in applicable_plans:
             for _ in agentspeak.unify_annotated(
                 plan.head, frozen, intention.scope, intention.stack
@@ -463,30 +544,48 @@ class Agent:
                 for _ in plan.context.execute(self, intention):
                     intention.head_term = frozen
                     intention.instr = plan.body
-                    intention.calling_term = term
+                    intention.calling_term = pending.term
 
-                    if not delayed and self.intentions:
+                    self._clear_pending_waiter(pending.calling_intention)
+
+                    if not pending.delayed and self.intentions:
                         for intention_stack in self.intentions:
-                            if intention_stack[-1] == calling_intention:
+                            if intention_stack[-1] == pending.calling_intention:
                                 intention_stack.append(intention)
-                                return True
+                                return
 
                     new_intention_stack = collections.deque()
                     new_intention_stack.append(intention)
                     self.intentions.append(new_intention_stack)
-                    return True
-        if goal_type == agentspeak.GoalType.achievement:
+                    return
+
+        self._clear_pending_waiter(pending.calling_intention)
+
+        if pending.goal_type == agentspeak.GoalType.achievement:
             raise AslError(
                 "no applicable plan for %s%s%s/%d"
-                % (trigger.value, goal_type.value, frozen.functor, len(frozen.args))
+                % (pending.trigger.value, pending.goal_type.value, frozen.functor, len(frozen.args))
             )
-        elif goal_type == agentspeak.GoalType.test:
-            return self.test_belief(term, calling_intention)
-        return True
+        # Belief events (and anything else that reaches here) with no
+        # matching reactive plan are simply dropped -- same as the old
+        # inline fallback for anything that wasn't an achievement or test
+        # goal.
+
+    @staticmethod
+    def _clear_pending_waiter(calling_intention):
+        waiter = calling_intention.waiter
+        if waiter is not None and getattr(waiter, "reason", None) == "pending-event":
+            calling_intention.waiter = None
 
     def _unachieve(self, term):
         """
             Unachieve is a performative that allows the agent to remove and stop an achievement to another agent.
+
+            Only searches self.intentions, deliberately: a same-named goal
+            that is still only a pending, uncommitted event in self.events
+            (see PendingEvent) is untouched by a -!goal arriving before it
+            was ever committed -- a known, accepted scope limit, not fixed
+            here (see stdlib.py's .drop_event for cancelling those).
         """
         if not agentspeak.is_literal(term):
                 raise AslError("expected literal term")
@@ -667,7 +766,48 @@ class Agent:
         if deadlines:
             return min(deadlines)
 
+    def select_event(self):
+        """Jason's pluggable SelEv. Default: FIFO (oldest raised first) --
+        identical to this fork's prior, non-pluggable commit-phase
+        behavior. Override in an Agent subclass (pass as agent_cls=... to
+        Environment.build_agent/build_agent_from_ast/build_agents -- an
+        existing, correctly-plumbed extension point already used to
+        construct every Agent, just never previously exercised with a
+        non-default value) for a custom policy: priority by annotation,
+        goal type, or any agent-specific heuristic.
+
+        Contract: must actually remove and return the chosen PendingEvent
+        from self.events (or leave the queue untouched and return None to
+        skip a commit this cycle) -- not just peek. No leading underscore,
+        unlike this class's other internal helpers (_commit_event,
+        _clear_pending_waiter, ...): this one is meant to be overridden
+        from outside the module.
+        """
+        if not self.events:
+            return None
+        return self.events.popleft()
+
     def step(self):
+        # Commit phase: select and commit at most one pending event this
+        # cycle -- interleaved with the execution phase below, matching
+        # Jason's own SelEv-then-SelInt reasoning cycle (one event
+        # selected, one intention stepped, each pass) rather than this
+        # fork's previous immediate, synchronous dispatch.
+        committed_event = False
+        pending = self.select_event()
+        if pending is not None:
+            try:
+                self._commit_event(pending)
+            except AslError as err:
+                log = agentspeak.Log(LOGGER)
+                raise log.error("%s", err)
+            except Exception as err:
+                log = agentspeak.Log(LOGGER)
+                raise log.exception(
+                    "agent %r raised python exception while committing event %r: %r",
+                    self.name, str(pending), err)
+            committed_event = True
+
         while self.intentions and not self.intentions[0]:
             self.intentions.popleft()
 
@@ -687,11 +827,11 @@ class Agent:
 
             break
         else:
-            return False
+            return committed_event
 
         # Ignore if the intentiosn stack is empty
         if not intention_stack:
-            return False
+            return committed_event
 
         instr = intention.instr
 
