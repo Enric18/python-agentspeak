@@ -1,0 +1,305 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Encoding and language -------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[british]{babel}
+
+% --- Basic layout and utilities --------------------------------------------
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{adjustbox}  % scale the diagram to fit both page dimensions at once
+\usepackage{pdflscape}  % the diagram is wide: render its page in landscape
+
+% --- Diagram ----------------------------------------------------------------
+% Requires the CTAN package tikz-uml (texlive-pictures / a full MiKTeX
+% install; MiKTeX will offer to auto-install it on first compile).
+\usepackage{tikz}
+\usepackage{tikz-uml}
+
+% Category colours -- match the palette used in agentspeak_uml.md
+\definecolor{umlCore}{HTML}{3A3D42}   % agentspeak runtime (unmodified)
+\definecolor{umlExt}{HTML}{7A6A55}    % spade_bdi (external)
+\definecolor{umlBDI}{HTML}{35578C}    % BDI / intentions actions
+\definecolor{umlPlan}{HTML}{8C6A1F}   % plan-library actions
+\definecolor{umlLife}{HTML}{6A4090}   % agent life-cycle actions
+\definecolor{umlMisc}{HTML}{1F7A6C}   % term / env / scheduling actions
+
+\newcommand{\ia}[1]{\texttt{#1}}
+
+\title{AgentSpeak core \& implemented \texttt{stdlib.py} actions\\[2pt]
+\large UML class diagram}
+\author{Enric Hern\'andez Minaya}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\noindent Scope: the interpreter classes in \texttt{agentspeak/\_\_init\_\_.py}
+and \texttt{agentspeak/runtime.py} that the standard-library actions actually
+touch, plus every internal action implemented in this project (marked
+\texttt{\#Enric} in \texttt{stdlib.py}), grouped the same way the project's
+own function table groups them. Pre-existing baseline actions (\ia{.print},
+\ia{.findall}, \ia{.wait}, \ldots{}) are omitted --- this is a map of what was
+\emph{built}, not the whole standard library.
+
+\bigskip
+\noindent\textbf{Colour key.} Grey boxes are the interpreter's own runtime
+classes (unmodified); the external \texttt{spade\_bdi} layer is warm brown;
+the four implemented-action groups are blue (BDI/intentions), ochre (plan
+library), plum (agent life-cycle) and teal (term/environment/scheduling). The
+diagram shows structural relationships only (composition/aggregation between
+runtime classes); which action group reads or mutates which piece of state is
+listed separately in Table~\ref{tab:touches}, since as free-standing
+signatures they have no natural tree structure to draw as edges without
+crossing.
+
+% ===========================================================================
+\begin{landscape}
+\begin{figure}[p]
+\centering
+\begin{adjustbox}{max width=\linewidth,max totalheight=0.85\textheight,center}
+\begin{tikzpicture}
+
+  % ------------------------------------------------------------------
+  % Core runtime -- a small tree, laid out top-to-bottom / left-to-right
+  % so every edge is short and none cross.
+  % ------------------------------------------------------------------
+  \umlclass[x=4,y=0,fill=umlCore,text=white]{Environment}{
+    agents
+  }{
+    build\_agent() \\
+    build\_agents() \\
+    run\_agent() \\
+    time()
+  }
+
+  \umlclass[x=4,y=-5,fill=umlCore,text=white]{Agent}{
+    env \\
+    name \\
+    beliefs \\
+    rules \\
+    plans \\
+    intentions
+  }{
+    call() \\
+    step() \\
+    run() \\
+    add\_belief() \\
+    add\_plan() \\
+    test\_belief() \\
+    remove\_belief()
+  }
+
+  \umlclass[x=11,y=-5,fill=umlCore,text=white]{Actions}{
+  }{
+    add() \\
+    add\_function() \\
+    add\_predicate() \\
+    lookup()
+  }
+
+  \umlclass[x=-2,y=-12,fill=umlCore,text=white]{Intention}{
+    instr \\
+    head\_term \\
+    calling\_term \\
+    scope \\
+    stack \\
+    waiter
+  }{
+  }
+
+  \umlclass[x=4.5,y=-12,fill=umlCore,text=white]{Plan}{
+    trigger \\
+    goal\_type \\
+    head \\
+    context \\
+    body \\
+    annotation
+  }{
+  }
+
+  \umlclass[x=11,y=-12,fill=umlCore,text=white]{Literal}{
+    functor \\
+    args \\
+    annots
+  }{
+    with\_annotation() \\
+    freeze() \\
+    unify()
+  }
+
+  \umlclass[x=-2,y=-17.5,fill=umlCore,text=white]{Waiter}{
+    event \\
+    until
+  }{
+    poll()
+  }
+
+  % ------------------------------------------------------------------
+  % spade_bdi (external), off to the side, connected only to Agent
+  % ------------------------------------------------------------------
+  \umlclass[x=18,y=-2,fill=umlExt,text=white]{BDIAgent}{
+    \guillemotleft external\guillemotright \\
+    bdi\_agent \\
+    bdi \\
+    jid
+  }{
+    start() \\
+    stop()
+  }
+
+  \umlclass[x=18,y=-8,fill=umlExt,text=white]{BDIBehaviour}{
+    \guillemotleft external\guillemotright
+  }{
+    set\_belief() \\
+    remove\_belief()
+  }
+
+  % ------------------------------------------------------------------
+  % Structural relationships (7 total, all short and non-crossing)
+  % ------------------------------------------------------------------
+  \umlaggreg[mult1=1,mult2=many]{Environment}{Agent}
+  \umlcompo[mult1=1,mult2=many,pos2=intentions]{Agent}{Intention}
+  \umlcompo[mult1=1,mult2=many,pos2=plans]{Agent}{Plan}
+  \umldep[]{Agent}{Actions}
+  \umlaggreg[mult1=1,mult2=0..1,pos2=waiter]{Intention}{Waiter}
+  \umluniassoc[pos2=head]{Plan}{Literal}
+  \umlcompo[mult1=1,mult2=1,pos2=bdi\_agent]{BDIAgent}{Agent}
+  \umlcompo[mult1=1,mult2=1,pos2=bdi]{BDIAgent}{BDIBehaviour}
+
+  % ------------------------------------------------------------------
+  % Implemented stdlib.py action groups -- a separate, edge-free gallery
+  % well clear of the tree above; grouping and colour carry the meaning,
+  % Table~\ref{tab:touches} carries the "what it touches" relationship.
+  % ------------------------------------------------------------------
+  \node[font=\bfseries] at (10.5,-21) {Implemented \texttt{stdlib.py} action groups};
+
+  \umlclass[x=-2,y=-22,fill=umlBDI,text=white]{BDIActions}{
+    \guillemotleft BDI / intentions\guillemotright
+  }{
+    currentIntention() \\
+    intend() \\
+    desire() \\
+    dropIntention() \\
+    dropAllIntentions() \\
+    dropDesire() \\
+    dropAllDesires() \\
+    dropEvent() \\
+    dropAllEvents() \\
+    failGoal() \\
+    succeedGoal() \\
+    suspend() \\
+    resume() \\
+    suspended() \\
+    intention()
+  }
+
+  \umlclass[x=6,y=-22,fill=umlPlan,text=white]{PlanLibraryActions}{
+    \guillemotleft plan library\guillemotright
+  }{
+    addPlan() \\
+    removePlan() \\
+    planLabel() \\
+    relevantPlans() \\
+    relevantPlan() \\
+    listPlans()
+  }
+
+  \umlclass[x=13,y=-22,fill=umlLife,text=white]{LifecycleActions}{
+    \guillemotleft agent life-cycle\guillemotright
+  }{
+    createAgent() \\
+    killAgent()
+  }
+
+  \umlclass[x=18,y=-22,fill=umlMisc,text=white]{MiscActions}{
+    \guillemotleft term / env / scheduling\guillemotright
+  }{
+    addAnnot() \\
+    at() \\
+    perceive()
+  }
+
+\end{tikzpicture}
+\end{adjustbox}
+\caption{AgentSpeak runtime classes (structural relationships only) and the
+\texttt{stdlib.py} internal actions implemented in this project. Method
+signatures are abbreviated here for layout; see Table~\ref{tab:signatures}
+for exact arities.}
+\end{figure}
+\end{landscape}
+
+% ===========================================================================
+\section*{What each action group touches}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Action group} & \textbf{Reads / mutates} \\ \hline
+BDIActions & \texttt{Intention.waiter}; rewrites \texttt{Agent.intentions} \\ \hline
+PlanLibraryActions & builds/renders \texttt{Plan}; reads/writes \texttt{Agent.plans} \\ \hline
+LifecycleActions & spawns/stops a \texttt{BDIAgent} \\ \hline
+MiscActions & \texttt{Literal.with\_annotation()}; schedules via \texttt{Agent.call()} \\ \hline
+\end{tabular}
+\caption{Which runtime state each implemented action group touches --
+shown as a table rather than diagram edges, since these are many-to-few
+relationships between free-standing functions and runtime fields, not a
+tree that lays out cleanly.}
+\label{tab:touches}
+\end{table}
+
+% ===========================================================================
+\section*{Reference: exact signatures}
+
+\begin{footnotesize}
+\begin{longtable}{|p{2.6cm}|p{5.2cm}|p{1.6cm}|p{6.0cm}|}
+\caption{Every action implemented in this project, grouped as in the
+diagram, with exact arity.\label{tab:signatures}}\\
+\hline
+\textbf{Group} & \textbf{Action} & \textbf{Arity} & \textbf{Notes} \\ \hline
+\endfirsthead
+\multicolumn{4}{c}{\tablename\ \thetable\ -- continued from previous page}\\ \hline
+\textbf{Group} & \textbf{Action} & \textbf{Arity} & \textbf{Notes} \\ \hline
+\endhead
+\hline \multicolumn{4}{r}{\footnotesize continued on next page}\\
+\endfoot
+\hline
+\endlastfoot
+
+BDI & \ia{.current\_intention(Id)} & 1 & binds the running intention \\ \hline
+BDI & \ia{.intend(Goal, Id?)} & 1--2 & test/enumerate intended goals \\ \hline
+BDI & \ia{.desire(Goal, Id?)} & 1--2 & alias of \ia{.intend} (no event queue) \\ \hline
+BDI & \ia{.drop\_intention(Goal)} & 1 & \\ \hline
+BDI & \ia{.drop\_all\_intentions()} & 0 & \\ \hline
+BDI & \ia{.drop\_desire(Goal)} & 1 & alias of \ia{.drop\_intention} \\ \hline
+BDI & \ia{.drop\_all\_desires()} & 0 & alias of \ia{.drop\_all\_intentions} \\ \hline
+BDI & \ia{.drop\_event(E)} / \ia{.drop\_all\_events()} & 1 / 0 & well-defined no-ops \\ \hline
+BDI & \ia{.fail\_goal(Goal)} & 1 & redirects to failure branch or drops \\ \hline
+BDI & \ia{.succeed\_goal(Goal)} & 1 & pops + back-unifies like natural completion \\ \hline
+BDI & \ia{.suspend(Goal?)} & 0--1 & reuses \texttt{Intention.waiter} \\ \hline
+BDI & \ia{.resume(Goal)} & 1 & clears only \ia{.suspend}-tagged waiters \\ \hline
+BDI & \ia{.suspended(Goal, Reason)} & 2 & test predicate \\ \hline
+BDI & \ia{.intention(Id, State, Stack?, current?)} & 2--4 & backtracks over \texttt{agent.intentions} \\ \hline
+Plan library & \ia{.add\_plan(PlanString)} & 1 & via \texttt{\_tell\_how} \\ \hline
+Plan library & \ia{.remove\_plan(Label)} & 1 & \\ \hline
+Plan library & \ia{.plan\_label(Plan, Label)} & 2 & backtracking \\ \hline
+Plan library & \ia{.relevant\_plans(Trigger, Plans)} & 2 & collects into a list \\ \hline
+Plan library & \ia{.relevant\_plan(Trigger, Plan)} & 2 & backtracking counterpart \\ \hline
+Plan library & \ia{.list\_plans(Trigger?)} & 0--1 & prints, debug aid \\ \hline
+Life-cycle & \ia{.create\_agent(Name, Source)} & 2 & spawns a real \texttt{BDIAgent} via the event loop \\ \hline
+Life-cycle & \ia{.kill\_agent(Name, Deadline?)} & 1--2 & optional \texttt{jag\_shutting\_down} grace period \\ \hline
+Misc & \ia{.add\_annot(Belief, Annot, Result)} & 3 & pure term utility \\ \hline
+Misc & \ia{.at(When, Event)} & 2 & \texttt{loop.call\_later}-scheduled event \\ \hline
+Misc & \ia{.perceive()} & 0 & no-op (perception is unconditional every cycle) \\ \hline
+
+\end{longtable}
+\end{footnotesize}
+
+\end{document}
