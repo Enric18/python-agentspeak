@@ -11,7 +11,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 async def main():
     # Swap the filename below to try a different test.
-    a = BDIAgent("testagent@localhost", "secret", "test_lists_and_sets.asl")
+    a = BDIAgent("testagent@localhost", "secret", "test_type.asl")
     await a.start(auto_register=True)
 
     # Only needed for test_perceive.asl: feeds a percept belief in from

@@ -205,6 +205,46 @@ def _print(agent, term, intention, _color_map={}, _current_color=[0]):
     yield
 
 
+@actions.add(".printf")  # Enric, variable arity like .concat: format + one or more args
+@agentspeak.optimizer.no_scope_effects
+def _printf(agent, term, intention, _color_map={}, _current_color=[0]):
+    """.printf(Format, Arg0[, Arg1, ...])
+
+    Print Format with Arg0, Arg1, ... substituted in, mirroring Jason's
+    own .printf (inspired by Java's printf/format). Uses Python's %
+    operator directly: Java's and Python's printf-style directives
+    (%d, %s, %f, %08.0f, %10.3f, ...) are the same C-derived syntax, so
+    Jason's own docs' examples port unchanged -- .printf("Value
+    %08.0f%n", N) becomes .printf("Value %08.0f\\n", N) here, %n not
+    being a Python format directive (use a literal newline instead).
+
+    Jason's own docs warn against %d, since Jason's numbers are always
+    Java doubles and %d demands an int -- that warning does not carry
+    over: Python's % operator converts a float to %d automatically, so
+    %d is safe to use here despite this engine's numbers facing the
+    exact same always-a-float situation Jason's warning describes.
+    """
+    if agent in _color_map:
+        color = _color_map[agent]
+    else:
+        color = COLORS[_current_color[0]]
+        _current_color[0] = (_current_color[0] + 1) % len(COLORS)
+        _color_map[agent] = color
+
+    memo = {}
+    fmt = agentspeak.grounded(term.args[0], intention.scope)
+    if not agentspeak.is_string(fmt):
+        raise agentspeak.AslError("expected a format string for .printf, got: '%s'" % (fmt, ))
+
+    args = tuple(agentspeak.freeze(t, intention.scope, memo) for t in term.args[1:])
+    text = fmt % args
+
+    with colorama.colorama_text():
+        print(color[0], color[1], agent.name, colorama.Fore.RESET, colorama.Back.RESET, " ", text, sep="")
+
+    yield
+
+
 @actions.add(".fail", 0)
 @agentspeak.optimizer.no_scope_effects
 def _fail(agent, term, intention):
@@ -234,6 +274,26 @@ def _concat(agent, term, intention):
 
 
 actions.add_function(".random", (), random.random)
+
+
+@actions.add(".set_random_seed", 1)  # Enric
+def _set_random_seed(agent, term, intention):
+    """.set_random_seed(N)
+
+    Sets the seed of the random number generator .random/.shuffle draw
+    from, mirroring Jason's .set_random_seed(N). Always succeeds.
+
+    Scope difference, stated precisely: Jason seeds a *per-agent* random
+    generator (each agent has its own), whereas .random/.shuffle here go
+    through Python's global random module -- so this reseeds the same
+    generator every agent in the process shares, not just the calling
+    agent's own stream. A per-agent generator isn't something this
+    engine's Agent class carries today.
+    """
+    seed = agentspeak.grounded(term.args[0], intention.scope)
+    random.seed(seed)
+    yield
+
 
 actions.add_function(".min", (tuple, ), min)
 actions.add_function(".max", (tuple, ), max)
@@ -268,6 +328,69 @@ def _substring(agent, term, intention):
 
         agentspeak.reroll(intention.scope, intention.stack, choicepoint)
         pos = haystack.find(needle, pos + 1)
+
+
+@actions.add(".replace", 4)  # Enric
+def _replace(agent, term, intention):
+    """.replace(S1, S2, S3, S4)
+
+    Unify S4 with S1 (a string, or any other term converted to its string
+    representation, matching Jason's own arg[0].toString() fallback) with
+    every occurrence of pattern S2 replaced by S3, mirroring Jason's
+    .replace(S1,S2,S3,S4). Jason's own implementation is Java's
+    String.replaceAll -- i.e. S2 is a regex, not a literal substring, and
+    S3 may contain backreferences -- so this reuses Python's re.sub
+    directly rather than a plain str.replace; the one unavoidable
+    difference is backreference syntax (Python's re.sub takes \\1, not
+    Java's $1), inherent to porting a Java-regex-shaped action onto
+    Python's own regex engine, not a deliberate behavioural choice.
+    """
+    import re
+
+    s1 = agentspeak.grounded(term.args[0], intention.scope)
+    s2 = agentspeak.grounded(term.args[1], intention.scope)
+    s3 = agentspeak.grounded(term.args[2], intention.scope)
+
+    source = s1 if agentspeak.is_string(s1) else asl_str(s1)
+    if not agentspeak.is_string(s2):
+        raise agentspeak.AslError("expected pattern for .replace to be a string")
+    if not agentspeak.is_string(s3):
+        raise agentspeak.AslError("expected replacement for .replace to be a string")
+
+    result = re.sub(s2, s3, source)
+
+    if agentspeak.unify(result, term.args[3], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".lower_case", 2)  # Enric
+def _lower_case(agent, term, intention):
+    """.lower_case(S1, S2)
+
+    Unify S2 with S1 (a string, or any other term converted to its string
+    representation, matching Jason's own arg[0].toString() fallback)
+    lower-cased. Mirrors Jason's .lower_case(S1,S2).
+    """
+    s1 = agentspeak.grounded(term.args[0], intention.scope)
+    source = s1 if agentspeak.is_string(s1) else asl_str(s1)
+
+    if agentspeak.unify(source.lower(), term.args[1], intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".upper_case", 2)  # Enric
+def _upper_case(agent, term, intention):
+    """.upper_case(S1, S2)
+
+    Unify S2 with S1 (a string, or any other term converted to its string
+    representation, matching Jason's own arg[0].toString() fallback)
+    upper-cased. Mirrors Jason's .upper_case(S1,S2).
+    """
+    s1 = agentspeak.grounded(term.args[0], intention.scope)
+    source = s1 if agentspeak.is_string(s1) else asl_str(s1)
+
+    if agentspeak.unify(source.upper(), term.args[1], intention.scope, intention.stack):
+        yield
 
 
 @actions.add(".member", 2)
@@ -566,6 +689,95 @@ actions.add_predicate(".string", (None, ), agentspeak.is_string)
 actions.add_predicate(".structure", (None, ), agentspeak.is_structure)
 
 
+@actions.add(".type", 2)  # Enric
+def _type(agent, term, intention):
+    """.type(Term, Type)
+
+    Retrieve or check Term's type(s), mirroring Jason's .type(argument,
+    type): a single query, backtracking through every type that applies
+    (a plain atom is simultaneously 'atom', 'literal' and 'ground', for
+    instance), rather than needing the six separate .atom/.literal/.list/
+    .number/.string/.structure predicates above plus .ground one at a
+    time. If Type is already bound, this only succeeds for a matching
+    type (a plain boolean check); if unbound, it enumerates every
+    applicable type via backtracking, most primitive first, exactly as
+    Jason orders them.
+
+    Term itself is evaluated, not grounded: Jason's own .type(X,T) with X
+    still an unbound variable is well-defined (T unifies with 'free'
+    alone, not an error), so this must not raise the way .grounded()
+    would for such a Term.
+
+    Jason additionally recognises 'set', 'map', 'queue', 'rule' and
+    'plan' as types -- this engine has no equivalent term types for any
+    of those, so they can never apply here and are omitted rather than
+    included as permanently-dead checks.
+    """
+    value = agentspeak.evaluate(term.args[0], intention.scope)
+
+    types = []
+    if agentspeak.is_number(value):
+        types.append("number")
+    if agentspeak.is_atom(value):
+        types.append("atom")
+    if agentspeak.is_literal(value):
+        types.append("literal")
+    if agentspeak.is_string(value):
+        types.append("string")
+    if agentspeak.is_list(value):
+        types.append("list")
+    if agentspeak.is_structure(value):
+        types.append("structure")
+    if agentspeak.is_ground(value, intention.scope):
+        types.append("ground")
+    if isinstance(value, agentspeak.Var):
+        types.append("free")
+
+    choicepoint = object()
+    for type_name in types:
+        intention.stack.append(choicepoint)
+        if agentspeak.unify(term.args[1], Literal(type_name), intention.scope, intention.stack):
+            yield
+        agentspeak.reroll(intention.scope, intention.stack, choicepoint)
+
+
+@actions.add(".eval", 2)  # Enric
+def _eval(agent, term, intention):
+    """.eval(Var, Expr)
+
+    Evaluate the logical/arithmetic expression Expr and unify Var with
+    the atom 'true' or 'false', mirroring Jason's .eval(term,query) --
+    e.g. .eval(X, true | false) and .eval(X, 3<5 & not 4+2<3) both unify
+    X with 'true', exactly as Jason's own reference examples show.
+
+    Scope limit, stated precisely rather than silently mismatched: Jason's
+    own Expr is a genuine LogicalFormula, which can also perform belief-
+    base queries (backtracking consultation of beliefs/rules) as part of
+    the expression -- Jason's .eval bypasses its normal argument
+    evaluation specifically to receive Expr unevaluated, as a query
+    object, for exactly this reason. This engine has no equivalent: an
+    action's arguments are always compiled as plain terms (via
+    BuildTermVisitor), never as queries (only plan contexts and
+    if/while/for conditions compile through BuildQueryVisitor into
+    query objects) -- so Expr here can only be pure arithmetic/logical
+    evaluation over already-bound values (&, |, not, comparisons,
+    arithmetic), the same class of expression this engine's BinaryExpr/
+    UnaryExpr already reduce to a plain bool without consulting the
+    belief base. A belief literal used inside Expr is not looked up the
+    way a real query would; if Expr doesn't reduce to a bool, this
+    raises rather than silently misbehaving.
+    """
+    value = agentspeak.evaluate(term.args[1], intention.scope)
+    if not isinstance(value, bool):
+        raise agentspeak.AslError(
+            "expected a logical/boolean expression for .eval's second "
+            "argument, got: %r" % (value, ))
+
+    result = Literal("true") if value else Literal("false")
+    if agentspeak.unify(term.args[0], result, intention.scope, intention.stack):
+        yield
+
+
 @actions.add(".ground", 1)
 @agentspeak.optimizer.no_scope_effects
 def _ground(agent, term, intention):
@@ -602,6 +814,48 @@ def _add_annot(agent, term, intention):
         raise agentspeak.AslError(
             "expected a literal or a list of literals for .add_annot, got: '%s'" % belief)
 
+    if agentspeak.unify(term.args[2], result, intention.scope, intention.stack):
+        yield
+
+
+@actions.add(".add_nested_source", 3)  # Enric
+def _add_nested_source(agent, term, intention):
+    """.add_nested_source(Belief, Source, Result)
+
+    Unify Result with Belief (a literal, or a list of literals -- applied
+    to each element), replacing any existing 'source(...)' annotation(s)
+    with a new one wrapping Source, nesting the old source annotation(s)
+    as annotations *on* the new one rather than discarding them --
+    mirrors Jason's own .add_nested_source exactly, including its
+    documented provenance-chain example:
+    .add_nested_source(a[source(bob)], jomi, B) unifies B with
+    a[source(jomi)[source(bob)]], i.e. "I believe a; my source is jomi;
+    jomi's own source was bob" -- a chain of who-told-whom, not merely
+    who last told me. Anything that isn't a literal or a list passes
+    through unchanged, matching Jason's own fallthrough.
+
+    Distinct from .add_annot: .add_annot always *adds* an annotation
+    alongside whatever is already there (so a second .add_annot with a
+    new source would leave two source(...) annotations side by side).
+    This action specifically replaces the existing source(s), preserving
+    them as nested provenance instead -- the two actions are not
+    interchangeable for source-tracking.
+    """
+    belief = agentspeak.freeze(term.args[0], intention.scope, {})
+    source = agentspeak.freeze(term.args[1], intention.scope, {})
+
+    def add_source(value):
+        if agentspeak.is_list(value):
+            return tuple(add_source(item) for item in value)
+        if agentspeak.is_literal(value):
+            is_source = lambda a: agentspeak.is_literal(a) and a.functor == "source"
+            existing_sources = frozenset(a for a in value.annots if is_source(a))
+            remaining = frozenset(a for a in value.annots if not is_source(a))
+            new_source = Literal("source", (source, ), existing_sources)
+            return Literal(value.functor, value.args, remaining | frozenset([new_source]))
+        return value
+
+    result = add_source(belief)
     if agentspeak.unify(term.args[2], result, intention.scope, intention.stack):
         yield
 
@@ -780,6 +1034,19 @@ def _time(agent, term, intention):
         agentspeak.unify(term.args[1], time.minute, intention.scope, intention.stack) and
         agentspeak.unify(term.args[2], time.second, intention.scope, intention.stack)):
 
+        yield
+
+
+@actions.add(".version", 1)  # Enric
+def _version(agent, term, intention):
+    """.version(V)
+
+    Unify V with this interpreter's version string, mirroring Jason's
+    .version(V) (which unifies with Jason's own version, e.g.
+    "2.4-SNAPSHOT"). Reports agentspeak.__version__ -- this fork's own
+    version, there being no separate "Jason version" concept here.
+    """
+    if agentspeak.unify(term.args[0], agentspeak.__version__, intention.scope, intention.stack):
         yield
 
 
@@ -1120,6 +1387,186 @@ def _kill_agent(agent, term, intention):
     else:
         loop.create_task(target.stop())
 
+    yield
+
+
+def _render_agent_source(agent, goals=()):
+    """Render agent's beliefs, rules and plans (plus optional initial
+    goals) as valid .asl source text -- shared by .save_agent (writes it
+    to a user-given file) and .clone (writes it to a temp file, then
+    spawns a new BDIAgent from it, exactly like .create_agent does).
+    """
+    lines = ["// beliefs and rules"]
+    for beliefs in agent.beliefs.values():
+        for belief in beliefs:
+            lines.append(agentspeak.asl_repr(belief) + ".")
+    for rules in agent.rules.values():
+        for rule in rules:
+            lines.append(str(rule) + ".")
+
+    lines.append("")
+    lines.append("// initial goals")
+    for g in goals:
+        lines.append("!" + agentspeak.asl_repr(g) + ".")
+
+    lines.append("")
+    lines.append("// plans")
+    for plans in agent.plans.values():
+        for plan in plans:
+            lines.append(agentspeak.runtime.plan_to_str(plan))
+
+    return "\n".join(lines) + "\n"
+
+
+@actions.add(".save_agent", 1)  # Enric
+@actions.add(".save_agent", 2)  # Enric
+def _save_agent(agent, term, intention):
+    """.save_agent(File[, InitialGoals])
+
+    Write the calling agent's beliefs, rules and plans to File as valid
+    .asl source -- mirrors Jason's own .save_agent(file[,initial_goals]).
+    InitialGoals, when given, is a list of goals written into the file
+    as "!Goal." lines, exactly as Jason's own does. The written file can
+    be read back with .include, or used directly as a fresh agent's
+    source (e.g. via .create_agent) -- reuses the same rendering
+    .clone(Name) uses internally to seed a new agent from this one.
+    """
+    filename = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+
+    goals = ()
+    if len(term.args) == 2:
+        goals = agentspeak.grounded(term.args[1], intention.scope)
+        if not agentspeak.is_list(goals):
+            raise agentspeak.AslError(
+                "expected a list of initial goals for .save_agent, got: '%s'" % (goals, ))
+
+    with open(filename, "w") as f:
+        f.write(_render_agent_source(agent, goals))
+
+    yield
+
+
+@actions.add(".include", 1)  # Enric
+def _include(agent, term, intention):
+    """.include(File)
+
+    Load File (an .asl file) at runtime, merging its beliefs, rules and
+    plans into the calling agent -- mirrors Jason's own .include(File),
+    minus its optional second (namespace) argument: this engine has no
+    namespace support at all (see .namespace), so only the 1-arg form is
+    offered. Initial goals declared in File are raised too, fire-and-
+    forget, exactly like an agent's own top-level initial goals.
+
+    Reuses the exact parse-and-populate steps
+    Environment.build_agent_from_ast uses to build a fresh agent from
+    source, just targeting the already-running calling agent instead of
+    constructing a new one.
+
+    Scope limit: included plans are compiled against this module's own
+    stdlib.actions registry, not necessarily whatever (possibly
+    extended) actions registry the calling agent was itself originally
+    built with -- Agent keeps no reference to the registry that built
+    it, so there is nothing else here to compile against.
+    """
+    filename = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+
+    with open(filename) as f:
+        content = f.read()
+
+    log = agentspeak.Log(LOGGER, 3)
+    source = agentspeak.StringSource(filename, content)
+    tokens = agentspeak.lexer.TokenStream(source, log)
+    ast_agent = agentspeak.parser.parse(source.name, tokens, log)
+    log.throw()
+
+    rt = agentspeak.runtime
+
+    for ast_rule in ast_agent.rules:
+        variables = {}
+        head = ast_rule.head.accept(rt.BuildTermVisitor(variables))
+        consequence = ast_rule.consequence.accept(rt.BuildQueryVisitor(variables, actions, log))
+        agent.add_rule(rt.Rule(head, consequence))
+
+    for ast_plan in ast_agent.plans:
+        variables = {}
+        head = ast_plan.event.head.accept(rt.BuildTermVisitor(variables))
+
+        if ast_plan.context:
+            context = ast_plan.context.accept(rt.BuildQueryVisitor(variables, actions, log))
+        else:
+            context = rt.TrueQuery()
+
+        body = rt.Instruction(rt.noop)
+        body.f = rt.noop
+        if ast_plan.body:
+            ast_plan.body.accept(rt.BuildInstructionsVisitor(variables, actions, body, log))
+
+        plan = rt.Plan(ast_plan.event.trigger, ast_plan.event.goal_type, head, context,
+                        body, ast_plan.body, ast_plan.annotation)
+        plan.args = ([str(i) for i in ast_plan.event.head.terms]
+                     + [str(j) for i in ast_plan.event.head.annotations for j in i.terms])
+
+        agent.add_plan(plan)
+
+    for ast_belief in ast_agent.beliefs:
+        belief = ast_belief.accept(rt.BuildTermVisitor({}))
+        agent.call(agentspeak.Trigger.addition, agentspeak.GoalType.belief,
+                   belief, rt.Intention(), delayed=True)
+
+    for ast_goal in ast_agent.goals:
+        goal_term = ast_goal.atom.accept(rt.BuildTermVisitor({}))
+        agent.call(agentspeak.Trigger.addition, agentspeak.GoalType.achievement,
+                   goal_term, rt.Intention(), delayed=True)
+
+    log.throw()
+    yield
+
+
+@actions.add(".clone", 1)  # Enric
+def _clone(agent, term, intention):
+    """.clone(Name)
+
+    Spawn a new platform agent under Name, seeded with a copy of the
+    calling agent's own current beliefs, rules and plans -- mirrors
+    Jason's own .clone(agent). Unlike .create_agent, which builds a new
+    agent from a given .asl file, .clone has nothing to read: it renders
+    the calling agent's own current state to .asl source (the same
+    rendering .save_agent uses) into a fresh temporary file, then spawns
+    exactly like .create_agent does from that file -- registered in the
+    same agent registry, so .kill_agent(Name) manages a clone exactly
+    like any .create_agent-created agent.
+
+    The temporary file is intentionally not cleaned up here: BDIAgent
+    reads it asynchronously, out of line with this call (the same
+    reason .create_agent's own spawn is asynchronous), so there is no
+    single safe point in this function to delete it from. A minor,
+    accepted resource cost, not a functional issue.
+    """
+    import asyncio
+    import tempfile
+    from spade_bdi.bdi import BDIAgent  # lazy import to avoid a circular import at load time
+
+    name = agentspeak.asl_str(agentspeak.grounded(term.args[0], intention.scope))
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".asl", prefix="clone_", delete=False
+    ) as tmp:
+        tmp.write(_render_agent_source(agent))
+        source = tmp.name
+
+    creator_jid = str(agent.name)
+    domain = creator_jid.split("@", 1)[1] if "@" in creator_jid else "localhost"
+    new_jid = "{}@{}".format(name, domain)
+    password = "secret"
+
+    loop = asyncio.get_running_loop()
+
+    async def _spawn():
+        child = BDIAgent(new_jid, password, source)
+        await child.start(auto_register=True)
+        _created_agents[name] = child
+
+    loop.create_task(_spawn())
     yield
 
 
