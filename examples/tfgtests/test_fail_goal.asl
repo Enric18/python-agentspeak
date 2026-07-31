@@ -1,3 +1,14 @@
+// Test for .fail_goal(Goal): makes the task working on Goal fail on
+// purpose, as if its plan had hit an error -- unlike .drop_intention,
+// which just silently throws the task away. Three different situations:
+//   Case 1: another, unrelated task (victim) is idle right at an
+//     if/else check when we fail its goal from outside -- it should
+//     wake up and take the ELSE branch, as if the IF had failed.
+//   Case 2: a task fails its OWN currently-running goal -- the very
+//     next line in that same plan must never run.
+//   Case 3: a task fails a goal that has a sub-goal running underneath
+//     it (nested) -- failing the outer goal must drop the whole chain,
+//     inner included, not just the outer frame.
 !start.
 
 +!start <-

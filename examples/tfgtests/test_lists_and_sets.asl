@@ -29,6 +29,9 @@
     .print("=== .suffix ===");
     if (.suffix([c], [a,b,c])) { .print("OK: .suffix([c],[a,b,c]) succeeds") } else { .print("ERROR") };
     if (.suffix([a,b], [a,b,c])) { .print("ERROR: .suffix([a,b],[a,b,c]) should fail") } else { .print("OK: .suffix([a,b],[a,b,c]) correctly fails") };
+    // With SX left unbound, .suffix backtracks through every suffix of
+    // [a,b,c] in turn ([a,b,c], [b,c], [c], []) -- the "for" loop here
+    // runs its body once per answer, printing each one as it's found.
     for (.suffix(SX, [a,b,c])) {
         .print("  suffix:", SX)
     };

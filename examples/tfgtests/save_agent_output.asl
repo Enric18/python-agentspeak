@@ -1,7 +1,7 @@
 // beliefs and rules
 item(2).
 item(1).
-p(_X_94a_1b697c72b10) :- item(_X_94a_1b697c72b10).
+p(_X_cbd_23fdc1a2410) :- item(_X_cbd_23fdc1a2410).
 
 // initial goals
 !go.

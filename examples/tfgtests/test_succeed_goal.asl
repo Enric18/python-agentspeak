@@ -1,3 +1,12 @@
+// Test for .succeed_goal(Goal): forces the task working on Goal to stop
+// right now and count as SUCCEEDED, as if its plan had finished
+// normally -- the positive counterpart of .fail_goal. Two cases:
+//   Case 1: a whole separate task (victim) is mid-.wait when we succeed
+//     it from outside -- it must stop early instead of finishing its
+//     wait and printing its own "ERROR" line.
+//   Case 2: a nested goal (inner, running inside outer) is succeeded --
+//     this should let outer resume normally afterwards, as if inner had
+//     genuinely finished on its own.
 !start.
 
 +!start <-
