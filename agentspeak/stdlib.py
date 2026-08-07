@@ -1837,12 +1837,22 @@ def _render_agent_source(agent, goals=()):
     for g in goals:
         lines.append("!" + agentspeak.asl_repr(g) + ".")
 
-    # Step 3: write out every plan in its full .asl source form.
+    # Step 3: write out every plan in its full .asl source form. Uses
+    # this module's own _plan_to_str, not agentspeak.runtime.plan_to_str:
+    # the runtime version is destructive (it pops from plan.args to fill
+    # in a plan's head placeholders, so a plan with head arguments can
+    # only ever be rendered once, successfully, per process) -- calling
+    # .clone and .save_agent on the same agent, in either order, would
+    # exhaust the same Plan objects' plan.args on the first call and then
+    # crash the second with "IndexError: pop from empty list". Found via
+    # exactly that sequence in the warehouse integration scenario
+    # (Chapter 5): .clone renders the whole plan library once during the
+    # shift, and .save_agent renders it again at shift end.
     lines.append("")
     lines.append("// plans")
     for plans in agent.plans.values():
         for plan in plans:
-            lines.append(agentspeak.runtime.plan_to_str(plan))
+            lines.append(_plan_to_str(plan))
 
     # Step 4: join everything into one text blob, one statement per line.
     return "\n".join(lines) + "\n"
@@ -1948,8 +1958,8 @@ def _include(agent, term, intention):
 
         plan = rt.Plan(ast_plan.event.trigger, ast_plan.event.goal_type, head, context,
                         body, ast_plan.body, ast_plan.annotation)
-        plan.args = ([str(i) for i in ast_plan.event.head.terms]
-                     + [str(j) for i in ast_plan.event.head.annotations for j in i.terms])
+        plan.args = rt.plan_head_arg_names(ast_plan.event.head)
+        plan.str_context = ast_plan.context
 
         agent.add_plan(plan)
 
@@ -2653,11 +2663,19 @@ def _plan_to_str(plan):
     # Implemented by Enric Hernandez-Minaya, May-Aug 2026
     # Step 1: the context clause prints as the plain word "true" when
     # there was no explicit ": Context" in the original plan, otherwise
-    # print the actual query.
+    # print the ORIGINAL, uncompiled context AST (plan.str_context), not
+    # the compiled Query object (plan.context) -- see Plan.str_context's
+    # comment in runtime.py. In short: a variable used only in the
+    # context (not in the head) gets renamed to an internal, unrecoverable
+    # placeholder once compiled, and only head arguments get their
+    # original names restored below (via plan.args); printing the
+    # compiled query directly would leak that placeholder and, once
+    # reparsed, sever the binding between the context and any body code
+    # relying on that same variable name.
     if isinstance(plan.context, agentspeak.runtime.TrueQuery):
         context = "true"
     else:
-        context = plan.context
+        context = plan.str_context if plan.str_context is not None else plan.context
 
     body = plan.str_body
 

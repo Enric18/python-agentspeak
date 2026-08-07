@@ -311,6 +311,22 @@ class ActionQuery:
         for _ in self.impl(agent, self.term, intention):
             yield
 
+    def __str__(self):
+        # Implemented by Enric Hernandez-Minaya, May-Aug 2026
+        # Step 1: render the same way TermQuery/AndQuery/etc. do, as the
+        # underlying call itself (e.g. ".desire(g)"), not as a raw Python
+        # object. Missing before this: any plan whose own triggering
+        # context calls an internal action directly (not merely inside an
+        # if/body) rendered as "<agentspeak.runtime.ActionQuery object at
+        # 0x...>" wherever a query gets turned back into text --
+        # .save_agent, .clone, and plan_to_str/_plan_to_str all go through
+        # this same __str__. Every other Query subclass already defines
+        # one; this was the one gap, only ever exercised once a plan's own
+        # context (not an if-condition inside its body) calls an internal
+        # action, which nothing in this project did until the warehouse
+        # integration scenario's .desire/.intend demonstration.
+        return str(self.term)
+
 
 class TermQuery:
     """The general-purpose query: check/search whether a given term
@@ -511,6 +527,26 @@ class Plan:
         # Step 2: a tiny 2-slot scratch list used when re-rendering the
         # plan's head back to text (see plan_to_str below).
         self.args = [None,None]
+        # Step 3: the plan's original, uncompiled context AST node (or
+        # None for a plan with no ": Context" at all), set by the
+        # caller right after construction. Needed for the same reason
+        # str_body is passed in as the raw AST body instead of the
+        # compiled one: a variable that appears only in the context
+        # (bound there, then used in the body -- e.g. "available_amr(Amr)"
+        # binding Amr for a body that later does "+amr_status(Amr, busy)")
+        # gets renamed to an internal placeholder ("_X_...") once compiled
+        # into a Query object, and that placeholder is not recoverable --
+        # plan.args only carries original names for the plan's HEAD
+        # arguments. Rendering plan.context directly (str(plan.context))
+        # would print that unrecoverable placeholder, and since str_body
+        # is rendered from the untouched AST (so it still says "Amr"), a
+        # round-tripped plan (.clone, .save_agent, .list_plans, tellHow,
+        # ...) would come back with the context and body referring to
+        # what are, after reparsing, two different variables -- silently
+        # breaking the binding. Kept as an actual attribute (not folded
+        # into the constructor signature) so existing external callers
+        # that construct Plan() directly keep working unchanged.
+        self.str_context = None
 
     def name(self):
         # Step 1: render as "<trigger><goal type><head>", e.g. "+!goal".
@@ -1034,7 +1070,8 @@ class Agent:
 
         plan = Plan(ast_plan.event.trigger, ast_plan.event.goal_type, head, context, body, ast_plan.body, ast_plan.annotation)
 
-        plan.args = [str(i) for i in ast_plan.event.head.terms] + [str(j) for i in ast_plan.event.head.annotations for j in i.terms]
+        plan.args = plan_head_arg_names(ast_plan.event.head)
+        plan.str_context = ast_plan.context
 
         self.add_plan(plan)
 
@@ -1337,16 +1374,57 @@ class Agent:
             pass
 
 
+def plan_head_arg_names(ast_head):
+    """Collect, left to right, the original source names of every NAMED
+    variable in a plan's head arguments and annotations -- skipping
+    constants and the anonymous "_" wildcard, neither of which compile to
+    a substitutable "_X_..." placeholder (a constant renders as itself;
+    Wildcard.__str__ is the literal string "_", not a placeholder either).
+    This is what Plan.args gets set to; plan_to_str()/_plan_to_str() pop
+    from it once per placeholder found in the compiled head's text, in
+    order, to restore the original argument names.
+
+    Bug this guards against: the naive version (str(t) for every t in
+    ast_head.terms, unconditionally) miscounts as soon as a head mixes a
+    constant with variables -- e.g. "+!fulfil(order_0, Product, Truck)"
+    only produces TWO placeholders once compiled (order_0 is a literal,
+    already rendered as "order_0" with no placeholder at all), but the
+    naive version still contributes three entries ("order_0", "Product",
+    "Truck"). Since the substitution pops strictly in order, everything
+    shifts by one: the Product placeholder is wrongly filled with
+    "order_0", the Truck placeholder with "Product" -- silently
+    corrupting the round-tripped plan (discovered via .clone regenerating
+    exactly this shape of plan and then failing with "term not ground"
+    once the mis-renamed variable no longer matched its own use in the
+    plan's body).
+    """
+    return (
+        [str(t) for t in ast_head.terms
+         if isinstance(t, agentspeak.parser.AstVariable) and t.name != "_"]
+        + [str(j) for i in ast_head.annotations for j in i.terms
+           if isinstance(j, agentspeak.parser.AstVariable) and j.name != "_"]
+    )
+
+
 def plan_to_str(plan):
     """
     This function recieves a plan and return the plan as string
     """
     # Step 1: a plan with no explicit condition renders its condition
-    # as the word "true"; otherwise render the condition query itself.
+    # as the word "true"; otherwise render the ORIGINAL, uncompiled
+    # context AST (plan.str_context), not the compiled Query object
+    # (plan.context). The compiled Query's variables were renamed to
+    # internal placeholders during compilation, and only the plan's
+    # HEAD arguments get those placeholders substituted back below --
+    # a variable used only in the context (e.g. "available_amr(Amr)"
+    # binding Amr for later use in the body) would otherwise render as
+    # an unrecoverable "_X_..." token, breaking the context/body
+    # binding once this text is reparsed (see Plan.str_context's own
+    # comment in the class above for the full story).
     if isinstance(plan.context, type(TrueQuery())):
         context = "true"
     else:
-        context = plan.context
+        context = plan.str_context if plan.str_context is not None else plan.context
 
     # Step 2: the body's text form was already prepared ahead of time.
     body = plan.str_body
@@ -1438,9 +1516,8 @@ class Environment:
 
             plan = Plan(ast_plan.event.trigger, ast_plan.event.goal_type, head, context, body, ast_plan.body, ast_plan.annotation)
 
-            plan.args = [str(i) for i in ast_plan.event.head.terms] + [str(j) for i in ast_plan.event.head.annotations for j in i.terms]
-
-
+            plan.args = plan_head_arg_names(ast_plan.event.head)
+            plan.str_context = ast_plan.context
 
             agent.add_plan(plan)
 
